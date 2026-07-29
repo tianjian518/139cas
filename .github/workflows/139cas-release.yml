@@ -1,0 +1,89 @@
+name: 139CAS binary release
+
+on:
+  push:
+    tags:
+      - "139cas-*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, for example 139cas-v1.0.0"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goarch: amd64
+          - goarch: arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.13"
+
+      - name: Setup web
+        run: bash build.sh dev web
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FRONTEND_REPO: ${{ vars.FRONTEND_REPO }}
+
+      - name: Build archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          built_at="$(date +'%F %T %z')"
+          git_commit="$(git rev-parse --short HEAD)"
+          ldflags="-w -s \
+            -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.BuiltAt=${built_at}' \
+            -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.GitAuthor=139cas <noreply@github.com>' \
+            -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.GitCommit=${git_commit}' \
+            -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.Version=${tag}' \
+            -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.WebVersion=rolling'"
+          mkdir -p dist
+          CGO_ENABLED=0 GOOS=linux GOARCH="${{ matrix.goarch }}" \
+            go build -trimpath -tags=jsoniter -ldflags="${ldflags}" -o dist/139cas .
+          tar -C dist -czf "139cas_linux_${{ matrix.goarch }}.tar.gz" 139cas
+          sha256sum "139cas_linux_${{ matrix.goarch }}.tar.gz" >"139cas_linux_${{ matrix.goarch }}.tar.gz.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: 139cas-linux-${{ matrix.goarch }}
+          path: |
+            139cas_linux_${{ matrix.goarch }}.tar.gz
+            139cas_linux_${{ matrix.goarch }}.tar.gz.sha256
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          name: ${{ github.event.inputs.tag || github.ref_name }}
+          make_latest: true
+          files: release-assets/*
