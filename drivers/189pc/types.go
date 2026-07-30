@@ -432,7 +432,7 @@ type RenameResp struct {
 	ResMsg      string `json:"res_message"`
 	CreateDate  Time   `json:"createDate"`
 	FileCate    int    `json:"fileCata"`
-	ID          string `json:"id"`
+	ID          String `json:"id"` // 部分云盘/跨盘复制场景下 id 以数字返回，使用自定义 String 类型兼容数字与字符串
 	LastOpTime  Time   `json:"lastOpTime"`
 	MD5         string `json:"md5"`
 	MediaType   int    `json:"mediaType"`
