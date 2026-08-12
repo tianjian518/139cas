@@ -166,7 +166,7 @@ func (d *Mediafire) MakeDir(ctx context.Context, parentDir model.Obj, dirName st
 		return nil, err
 	}
 
-	created, _ := time.Parse("2006-01-02T15:04:05Z", resp.Response.CreatedUTC)
+	created, _ := time.Parse("2006-01-02T15:04:05Z", utils.SanitizeTimeString(resp.Response.CreatedUTC))
 
 	return &model.Object{
 		ID:       resp.Response.FolderKey,

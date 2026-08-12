@@ -250,12 +250,12 @@ func (f File) GetName() string {
 }
 
 func (f File) ModTime() time.Time {
-	t, _ := time.Parse(time.RFC3339, f.CreateAt)
+	t, _ := time.Parse(time.RFC3339, utils.SanitizeTimeString(f.CreateAt))
 	return t
 }
 
 func (f File) CreateTime() time.Time {
-	t, _ := time.Parse(time.RFC3339, f.CreateAt)
+	t, _ := time.Parse(time.RFC3339, utils.SanitizeTimeString(f.CreateAt))
 	return t
 }
 

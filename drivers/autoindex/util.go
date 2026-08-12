@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
 	"github.com/antchfx/xpath"
 	"github.com/pkg/errors"
 )
@@ -108,7 +109,7 @@ func parseTime(res any, format string) (time.Time, error) {
 		return time.Now(), err
 	}
 	s = strings.TrimSpace(s)
-	t, err := time.Parse(format, s)
+	t, err := time.Parse(format, utils.SanitizeTimeString(s))
 	if err != nil {
 		return time.Now(), errors.WithMessagef(err, "failed to convert %s to time", s)
 	}

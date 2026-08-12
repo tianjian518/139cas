@@ -91,7 +91,7 @@ func (d *ILanZou) List(ctx context.Context, dir model.Obj, args model.ListArgs) 
 		}
 	}
 	return utils.SliceConvert(res, func(f ListItem) (model.Obj, error) {
-		updTime, err := time.ParseInLocation("2006-01-02 15:04:05", f.UpdTime, time.Local)
+		updTime, err := time.ParseInLocation("2006-01-02 15:04:05", utils.SanitizeTimeString(f.UpdTime), time.Local)
 		if err != nil {
 			return nil, err
 		}

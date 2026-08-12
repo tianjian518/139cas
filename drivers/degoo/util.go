@@ -14,6 +14,7 @@ import (
 
 	"github.com/OpenListTeam/OpenList/v4/drivers/base"
 	"github.com/OpenListTeam/OpenList/v4/internal/op"
+	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
 )
 
 // Thanks to https://github.com/bernd-wechner/Degoo for API research.
@@ -371,7 +372,7 @@ func (d *Degoo) handleGraphQLError(ctx context.Context, gqlError DegooErrors, op
 
 // humanReadableTimes converts Degoo timestamps to Go time.Time.
 func humanReadableTimes(creation, modification, upload string) (cTime, mTime, uTime time.Time) {
-	cTime, _ = time.Parse(time.RFC3339, creation)
+	cTime, _ = time.Parse(time.RFC3339, utils.SanitizeTimeString(creation))
 	if modification != "" {
 		modMillis, _ := strconv.ParseInt(modification, 10, 64)
 		mTime = time.Unix(0, modMillis*int64(time.Millisecond))

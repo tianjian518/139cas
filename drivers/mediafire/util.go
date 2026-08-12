@@ -274,7 +274,7 @@ func (d *Mediafire) getFolderContentByType(ctx context.Context, folderKey, conte
 
 // fileToObj converts MediaFire file data to model.ObjThumb with thumbnail support
 func (d *Mediafire) fileToObj(f File) *model.ObjThumb {
-	created, _ := time.Parse("2006-01-02T15:04:05Z", f.CreatedUTC)
+	created, _ := time.Parse("2006-01-02T15:04:05Z", utils.SanitizeTimeString(f.CreatedUTC))
 
 	var thumbnailURL string
 	if !f.IsFolder && f.ID != "" {
@@ -732,4 +732,3 @@ func (d *Mediafire) getFileByHash(ctx context.Context, hash string) (*model.ObjT
 	file := resp.Response.FileInfo[0]
 	return d.fileToObj(file), nil
 }
-

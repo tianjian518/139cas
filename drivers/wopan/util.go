@@ -3,6 +3,7 @@ package template
 import (
 	"time"
 
+	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
 	"github.com/OpenListTeam/wopan-sdk-go"
 )
 
@@ -37,5 +38,5 @@ func (d *Wopan) getSpaceType() string {
 // 20230607214351
 func getTime(str string) (time.Time, error) {
 	loc := time.FixedZone("UTC+8", 8*60*60)
-	return time.ParseInLocation("20060102150405", str, loc)
+	return time.ParseInLocation("20060102150405", utils.SanitizeTimeString(str), loc)
 }

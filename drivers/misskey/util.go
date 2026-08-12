@@ -234,7 +234,7 @@ func (d *Misskey) put(ctx context.Context, dstDir model.Obj, stream model.FileSt
 }
 
 func mFile2Object(file MFile) *model.ObjThumbURL {
-	ctime, err := time.Parse(time.RFC3339, file.CreatedAt)
+	ctime, err := time.Parse(time.RFC3339, utils.SanitizeTimeString(file.CreatedAt))
 	if err != nil {
 		ctime = time.Time{}
 	}
@@ -256,7 +256,7 @@ func mFile2Object(file MFile) *model.ObjThumbURL {
 }
 
 func mFolder2Object(folder MFolder) *model.Object {
-	ctime, err := time.Parse(time.RFC3339, folder.CreatedAt)
+	ctime, err := time.Parse(time.RFC3339, utils.SanitizeTimeString(folder.CreatedAt))
 	if err != nil {
 		ctime = time.Time{}
 	}

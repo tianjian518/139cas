@@ -71,7 +71,7 @@ func calSign(body, ts, randStr string) string {
 }
 
 func getTime(t string) time.Time {
-	stamp, _ := time.ParseInLocation("20060102150405", t, utils.CNLoc)
+	stamp, _ := time.ParseInLocation("20060102150405", utils.SanitizeTimeString(t), utils.CNLoc)
 	return stamp
 }
 
@@ -624,7 +624,7 @@ func (d *Yun139) isboPost(pathname string, data interface{}, resp interface{}) (
 }
 
 func getPersonalTime(t string) time.Time {
-	stamp, err := time.ParseInLocation("2006-01-02T15:04:05.999-07:00", t, utils.CNLoc)
+	stamp, err := time.ParseInLocation("2006-01-02T15:04:05.999-07:00", utils.SanitizeTimeString(t), utils.CNLoc)
 	if err != nil {
 		panic(err)
 	}

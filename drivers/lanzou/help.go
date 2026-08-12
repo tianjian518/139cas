@@ -4,6 +4,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -19,7 +20,7 @@ var timeSplitReg = regexp.MustCompile("([0-9.]*)\\s*([\u4e00-\u9fa5]+)")
 
 // 如果解析失败,则返回当前时间
 func MustParseTime(str string) time.Time {
-	lastOpTime, err := time.ParseInLocation("2006-01-02 -07", str+" +08", time.Local)
+	lastOpTime, err := time.ParseInLocation("2006-01-02 -07", utils.SanitizeTimeString(str+" +08"), time.Local)
 	if err != nil {
 		strs := timeSplitReg.FindStringSubmatch(str)
 		lastOpTime = time.Now()

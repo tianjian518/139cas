@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/xml"
 	"fmt"
+	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
 	"io"
 	"net/url"
 	"strconv"
@@ -69,7 +70,7 @@ func parseInt64(s *string) int64 {
 }
 
 func parseModified(s *string) time.Time {
-	if t, e := time.Parse(time.RFC1123, *s); e == nil {
+	if t, e := time.Parse(time.RFC1123, utils.SanitizeTimeString(*s)); e == nil {
 		return t
 	}
 	return time.Unix(0, 0)

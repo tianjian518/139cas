@@ -315,7 +315,7 @@ func (ct *CustomTime) UnmarshalJSON(b []byte) error {
 		return nil
 	}
 
-	t, err := time.Parse(`"`+timeFormat+`"`, str)
+	t, err := time.Parse(`"`+timeFormat+`"`, utils.SanitizeTimeString(str))
 	if err != nil {
 		return err
 	}

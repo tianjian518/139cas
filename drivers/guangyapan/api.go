@@ -11,6 +11,7 @@ import (
 
 	"github.com/OpenListTeam/OpenList/v4/drivers/base"
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
+	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
 	"github.com/go-resty/resty/v2"
 )
 
@@ -473,10 +474,10 @@ func parseTime(value any) time.Time {
 		if n, err := strconv.ParseFloat(v, 64); err == nil {
 			return unixTime(n)
 		}
-		if t, err := time.Parse(time.RFC3339, strings.Replace(v, "Z", "+00:00", 1)); err == nil {
+		if t, err := time.Parse(time.RFC3339, utils.SanitizeTimeString(strings.Replace(v, "Z", "+00:00", 1))); err == nil {
 			return t
 		}
-		if t, err := time.Parse("2006-01-02 15:04:05", v); err == nil {
+		if t, err := time.Parse("2006-01-02 15:04:05", utils.SanitizeTimeString(v)); err == nil {
 			return t
 		}
 	}

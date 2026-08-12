@@ -312,7 +312,7 @@ func (d *CloudreveV4) isTokenExpired() bool {
 		// use expires field if possible to prevent timezone issue
 		// only available after login or refresh token
 		// 2025-08-28T02:43:07.645109985+08:00
-		expires, err = time.Parse(time.RFC3339Nano, d.AccessExpires)
+		expires, err = time.Parse(time.RFC3339Nano, utils.SanitizeTimeString(d.AccessExpires))
 		if err != nil {
 			return false
 		}
@@ -335,7 +335,7 @@ func (d *CloudreveV4) isTokenExpired() bool {
 		// current access token expired, check if refresh token is expired
 		// warning: cannot parse refresh token from jwt, because the exp field is not standard
 		if d.RefreshExpires != "" {
-			refreshExpires, err := time.Parse(time.RFC3339Nano, d.RefreshExpires)
+			refreshExpires, err := time.Parse(time.RFC3339Nano, utils.SanitizeTimeString(d.RefreshExpires))
 			if err != nil {
 				return false
 			}

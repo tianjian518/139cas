@@ -7,6 +7,8 @@ import (
 	"encoding/hex"
 	"encoding/xml"
 	"fmt"
+	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
+	log "github.com/sirupsen/logrus"
 	"net/http"
 	"regexp"
 	"strings"
@@ -74,14 +76,21 @@ func (t *Time) Unmarshal(b []byte) error {
 	bs := strings.Trim(string(b), "\"")
 	var v time.Time
 	var err error
-	for _, f := range []string{"2006-01-02 15:04:05 -07", "Jan 2, 2006 15:04:05 PM -07"} {
-		v, err = time.ParseInLocation(f, bs+" +08", time.Local)
+	for _, f := range []string{"2006-01-02 15:04:05 -07", "Jan 2, 2006 15:04:05 PM -07", "Jan 2, 2006, 15:04:05 PM -07"} {
+		v, err = time.ParseInLocation(f, utils.SanitizeTimeString(bs+" +08"), time.Local)
 		if err == nil {
 			break
 		}
 	}
+	if err != nil {
+		// 降级：单个文件时间解析失败不中断整个任务（如跨存储复制），
+		// 仅记录告警并置零值时间，继续处理后续文件。
+		log.Warnf("[189_tv] failed to parse time %q: %v, fallback to zero time", bs, err)
+		*t = Time(time.Time{})
+		return nil
+	}
 	*t = Time(v)
-	return err
+	return nil
 }
 
 type String string

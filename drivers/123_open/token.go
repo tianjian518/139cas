@@ -9,6 +9,7 @@ import (
 
 	"github.com/OpenListTeam/OpenList/v4/drivers/base"
 	"github.com/OpenListTeam/OpenList/v4/internal/op"
+	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
 )
 
 var (
@@ -115,7 +116,7 @@ func (d *Open123) flushAccessToken() error {
 		if resp.Data.AccessToken == "" || resp.Data.ExpiredAt == "" {
 			return errors.New("invalid token payload from developer API")
 		}
-		expiredAt, err := time.Parse(time.RFC3339, resp.Data.ExpiredAt)
+		expiredAt, err := time.Parse(time.RFC3339, utils.SanitizeTimeString(resp.Data.ExpiredAt))
 		if err != nil {
 			return fmt.Errorf("parse expire time failed: %w", err)
 		}
