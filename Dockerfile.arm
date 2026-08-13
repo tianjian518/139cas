@@ -1,0 +1,13 @@
+# 仅用于把预编译好的静态二进制 COPY 进官方基础镜像（不重新编译，避免 QEMU 模拟）
+# 由 GitHub Actions 按平台分别传入 BIN=openlist-arm64 / openlist-armv7
+ARG BIN=openlist-arm64
+FROM openlistteam/openlist-base-image:base
+ARG BIN
+WORKDIR /opt/openlist/
+COPY --chmod=755 --chown=1001:1001 ${BIN} /opt/openlist/openlist
+COPY --chmod=755 --chown=1001:1001 entrypoint.sh /entrypoint.sh
+USER 1001
+ENV UMASK=022
+VOLUME /opt/openlist/data/
+EXPOSE 5244 5245
+CMD ["/entrypoint.sh"]

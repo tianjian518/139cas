@@ -1,0 +1,119 @@
+name: Build ARM & Push (U+202F fix)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '版本标签（同时写入 :latest 与 :<version>）'
+        required: false
+        default: 'u202f-fix'
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    env:
+      REPO: tianjian518/139cas
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Download frontend dist (rolling)
+        run: |
+          set -e
+          FRONTEND_REPO=OpenListTeam/OpenList-Frontend
+          ASSET_URL=$(curl -fsSL -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/$FRONTEND_REPO/releases/tags/rolling" \
+            | python3 -c "import sys,json; d=json.load(sys.stdin); urls=[a['browser_download_url'] for a in d.get('assets',[]) if 'openlist-frontend-dist' in a['name'] and 'lite' not in a['name'] and a['name'].endswith('.tar.gz')]; print(urls[0] if urls else '')")
+          echo "dist asset: $ASSET_URL"
+          [ -n "$ASSET_URL" ] || exit 1
+          curl -fsSL "$ASSET_URL" -o dist.tar.gz
+          rm -rf public/dist && mkdir -p public/dist
+          tar -zxvf dist.tar.gz -C public/dist
+          rm -f dist.tar.gz
+
+      - name: Cross-compile arm64 binary
+        run: |
+          set -e
+          VERSION=v0.0.0-u202f-fix
+          COMMIT=$(git rev-parse --short HEAD)
+          CGO_ENABLED=0 GOARCH=arm64 go build -tags jsoniter \
+            -ldflags="-w -s -X github.com/OpenListTeam/OpenList/v4/internal/conf.Version=$VERSION -X github.com/OpenListTeam/OpenList/v4/internal/conf.GitCommit=$COMMIT" \
+            -o openlist-arm64 .
+
+      - name: Cross-compile arm/v7 binary
+        run: |
+          set -e
+          VERSION=v0.0.0-u202f-fix
+          COMMIT=$(git rev-parse --short HEAD)
+          CGO_ENABLED=0 GOARCH=arm GOARM=7 go build -tags jsoniter \
+            -ldflags="-w -s -X github.com/OpenListTeam/OpenList/v4/internal/conf.Version=$VERSION -X github.com/OpenListTeam/OpenList/v4/internal/conf.GitCommit=$COMMIT" \
+            -o openlist-armv7 .
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build & push arm64
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile.arm
+          platforms: linux/arm64
+          build-args: BIN=openlist-arm64
+          push: true
+          tags: ${{ env.REPO }}:arm64
+
+      - name: Build & push arm/v7
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile.arm
+          platforms: linux/arm/v7
+          build-args: BIN=openlist-armv7
+          push: true
+          tags: ${{ env.REPO }}:armv7
+
+      - name: Reassemble multi-arch manifests (:latest + :version)
+        run: |
+          set -e
+          REPO=${{ env.REPO }}
+          VERSION=${{ github.event.inputs.version }}
+          # 拉取当前 :latest，保留除 arm64 / arm/v7 之外的其余架构 digest
+          docker manifest inspect "$REPO:latest" > /tmp/cur.json
+          NONARM=$(python3 - <<'PY'
+          import json
+          d=json.load(open('/tmp/cur.json'))
+          out=[]
+          for m in d.get('manifests', []):
+              p=m.get('platform')
+              if not p:
+                  continue
+              a=p.get('architecture'); v=p.get('variant','')
+              if a=='arm64' or (a=='arm' and v in ('v7','7','')):
+                  continue
+              out.append(m['digest'])
+          print(' '.join(out))
+          PY
+          )
+          echo "保留的其余架构 digest: $NONARM"
+          for tag in latest "$VERSION"; do
+            docker manifest rm "$REPO:$tag" 2>/dev/null || true
+            docker manifest create "$REPO:$tag" \
+              $(for dg in $NONARM; do echo "$REPO@$dg"; done) \
+              "$REPO:arm64" "$REPO:armv7"
+            docker manifest push "$REPO:$tag" --purge
+            echo "已推送 manifest: $REPO:$tag"
+          done
