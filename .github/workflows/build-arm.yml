@@ -80,7 +80,6 @@ jobs:
           build-args: BIN=openlist-arm64
           push: true
           provenance: false
-          attestations: false
           tags: ${{ env.REPO }}:arm64
 
       - name: Build & push arm/v7
@@ -92,14 +91,13 @@ jobs:
           build-args: BIN=openlist-armv7
           push: true
           provenance: false
-          attestations: false
           tags: ${{ env.REPO }}:armv7
 
       - name: Reassemble multi-arch manifests (:latest + :version)
         run: |
           set -e
           REPO=${{ env.REPO }}
-          VERSION=${{ github.event.inputs.version }}
+          VERSION=${{ github.event.inputs.version || 'u202f-fix' }}
           # 拉取当前 :latest，保留除 arm64 / arm/v7 之外的其余架构 digest
           docker manifest inspect "$REPO:latest" > /tmp/cur.json
           NONARM=$(python3 - <<'PY'
