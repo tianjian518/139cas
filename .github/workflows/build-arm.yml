@@ -74,6 +74,8 @@ jobs:
           platforms: linux/arm64
           build-args: BIN=openlist-arm64
           push: true
+          provenance: false
+          attestations: false
           tags: ${{ env.REPO }}:arm64
 
       - name: Build & push arm/v7
@@ -84,6 +86,8 @@ jobs:
           platforms: linux/arm/v7
           build-args: BIN=openlist-armv7
           push: true
+          provenance: false
+          attestations: false
           tags: ${{ env.REPO }}:armv7
 
       - name: Reassemble multi-arch manifests (:latest + :version)
