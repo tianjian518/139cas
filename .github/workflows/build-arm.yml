@@ -7,6 +7,11 @@ on:
         description: '版本标签（同时写入 :latest 与 :<version>）'
         required: false
         default: 'u202f-fix'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-arm.yml'
+      - 'Dockerfile.arm'
 
 permissions:
   contents: read
