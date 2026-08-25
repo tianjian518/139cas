@@ -635,7 +635,10 @@ func (d *Yun139) Put(ctx context.Context, dstDir model.Obj, stream model.FileStr
 		info := &casUploadInfo{Name: sourceName, Size: sourceSize, SHA256: fullHash}
 		casObj, err := d.uploadCAS(ctx, dstDir, info)
 		if err != nil {
-			return nil, err
+			// CAS 轻量占位上传失败（多为 139 接口被限流）不应让整次复制失败：
+			// 真实文件已通过 personalPut 落盘，缺少 .cas 占位只是元信息不完整，可后续重试。
+			log.Warnf("[139] CAS 占位上传失败（非致命，保留真实文件）: %v", err)
+			return newObj, nil
 		}
 		if casObj != nil && d.shouldDeleteSource() {
 			if err = d.deleteSource(ctx, dstDir, newObj, info); err != nil {

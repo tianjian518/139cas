@@ -169,7 +169,7 @@ func (d *Yun139) request(url string, method string, callback base.ReqCallback, r
 	var e BaseResp
 	req.SetResult(&e)
 	log.Debugf("[139] request: %s %s, body: %s", method, url, string(body))
-	res, err := req.Execute(method, url)
+	res, err := do139Execute(req, method, url)
 	if err != nil {
 		log.Debugf("[139] request error: %v", err)
 		return nil, err
@@ -245,7 +245,7 @@ func (d *Yun139) requestRoute(data interface{}, resp interface{}) ([]byte, error
 
 	var e BaseResp
 	req.SetResult(&e)
-	res, err := req.Execute(http.MethodPost, url)
+	res, err := do139Execute(req, http.MethodPost, url)
 	log.Debugln(res.String())
 	if !e.Success {
 		return nil, errors.New(e.Message)
@@ -582,7 +582,7 @@ func (d *Yun139) personalRequestWithHeaders(pathname string, method string, call
 	var e BaseResp
 	req.SetResult(&e)
 	log.Debugf("[139] personal request: %s %s, body: %s", method, url, string(body))
-	res, err := req.Execute(method, url)
+	res, err := do139Execute(req, method, url)
 	if err != nil {
 		log.Debugf("[139] personal request error: %v", err)
 		return nil, err
@@ -1154,10 +1154,10 @@ func (d *Yun139) yun139EncryptedRequest(url string, body interface{}, headers ma
 	payload := base64.StdEncoding.EncodeToString(append(iv, encryptedBody...))
 
 	// 4. Make the request
-	res, err := base.RestyClient.R().
+	req := base.RestyClient.R().
 		SetHeaders(headers).
-		SetBody(payload).
-		Post(url)
+		SetBody(payload)
+	res, err := do139Execute(req, http.MethodPost, url)
 
 	if err != nil {
 		return nil, fmt.Errorf("yun139EncryptedRequest: http request failed: %w", err)
