@@ -750,32 +750,26 @@ func (d *Yun139) uploadPersonalParts(ctx context.Context, partInfos []PartInfo, 
 		}
 		partSize := partInfos[index].PartSize
 		log.Debugf("[139] uploading part %+v/%+v", index, len(partInfos))
-		limitReader := io.LimitReader(rateLimited, partSize)
-		r := io.TeeReader(limitReader, p)
-		req, err := http.NewRequestWithContext(ctx, http.MethodPut, uploadPartInfo.UploadUrl, r)
+		// 先把这一分片读入内存（同时更新进度），便于在 429/5xx 时安全重放
+		var partBuf bytes.Buffer
+		if _, err := io.Copy(&partBuf, io.TeeReader(io.LimitReader(rateLimited, partSize), p)); err != nil {
+			return fmt.Errorf("buffer upload part: %w", err)
+		}
+		partHeaders := map[string]string{
+			"Content-Type":   "application/octet-stream",
+			"Content-Length": fmt.Sprint(partSize),
+			"Origin":         "https://yun.139.com",
+			"Referer":        "https://yun.139.com/",
+		}
+		res, err := do139Upload(ctx, http.MethodPut, uploadPartInfo.UploadUrl, partHeaders, partBuf.Bytes())
 		if err != nil {
 			return err
 		}
-		req.Header.Set("Content-Type", "application/octet-stream")
-		req.Header.Set("Content-Length", fmt.Sprint(partSize))
-		req.Header.Set("Origin", "https://yun.139.com")
-		req.Header.Set("Referer", "https://yun.139.com/")
-		req.ContentLength = partSize
-		err = func() error {
-			res, err := base.HttpClient.Do(req)
-			if err != nil {
-				return err
-			}
-			defer res.Body.Close()
-			log.Debugf("[139] uploaded: %+v", res)
-			if res.StatusCode != http.StatusOK {
-				body, _ := io.ReadAll(res.Body)
-				return fmt.Errorf("unexpected status code: %d, body: %s", res.StatusCode, string(body))
-			}
-			return nil
-		}()
-		if err != nil {
-			return err
+		defer res.Body.Close()
+		log.Debugf("[139] uploaded: %+v", res)
+		if res.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(res.Body)
+			return fmt.Errorf("unexpected status code: %d, body: %s", res.StatusCode, string(body))
 		}
 	}
 	return nil

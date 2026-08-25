@@ -1,10 +1,15 @@
 package _139
 
 import (
+	"bytes"
+	"context"
+	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/OpenListTeam/OpenList/v4/drivers/base"
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
 	"github.com/go-resty/resty/v2"
 	log "github.com/sirupsen/logrus"
@@ -82,4 +87,61 @@ func do139Execute(req *resty.Request, method, url string) (*resty.Response, erro
 		}
 	}
 	return res, err
+}
+
+// do139Upload 执行 139 的「真实字节上传」HTTP 请求（PUT 分片 / POST 重定向 URL），
+// 并对 429/5xx/网络抖动自动重试（指数退避，最多 6 次尝试）。
+//
+// 与 do139Execute 的区别：do139Execute 包的是 139 的 *API* 调用
+//（/file/create、/file/getUploadUrl、/file/complete 等），走 resty；
+// 这里包的是 base.HttpClient.Do 的裸上传——body 必须是可重放的 []byte。
+//
+// 之前只包了 API 调用是不够的：跨盘复制时 API 调用虽然重试了，
+// 但真正把文件字节 POST/PUT 到 139 上传地址（RedirectionURL / UploadUrl）
+// 的那一步是裸 http.Client.Do，撞 429 直接挂——这正是
+// "夸克→移动盘"复制时报 429 + "状态码非 200" 的第二处根因。
+func do139Upload(ctx context.Context, method, url string, headers map[string]string, body []byte) (*http.Response, error) {
+	var resp *http.Response
+	var err error
+	for attempt := 0; attempt <= yun139MaxRetry; attempt++ {
+		if attempt > 0 {
+			wait := yun139RetryWaitBase * time.Duration(1<<uint(attempt-1))
+			if wait > yun139RetryWaitMax {
+				wait = yun139RetryWaitMax
+			}
+			log.Warnf("[139] 上传分片临时失败，%s 后第 %d/%d 次重试: %s %s (err=%v)",
+				wait, attempt, yun139MaxRetry, method, url, err)
+			time.Sleep(wait)
+		}
+		req, reqErr := http.NewRequestWithContext(ctx, method, url, bytes.NewReader(body))
+		if reqErr != nil {
+			return nil, reqErr
+		}
+		for k, v := range headers {
+			req.Header.Set(k, v)
+		}
+		req.ContentLength = int64(len(body))
+		resp, err = base.HttpClient.Do(req)
+		if err != nil {
+			// 网络层抖动：下一轮重试
+			continue
+		}
+		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
+			// 限流/服务端错误：取 body 做日志后重试
+			b, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			preview := b
+			if len(preview) > 256 {
+				preview = preview[:256]
+			}
+			err = fmt.Errorf("upload endpoint status %d (状态码非 200), body: %s", resp.StatusCode, string(preview))
+			continue
+		}
+		// 其他状态（含 200 / 4xx 非 429）直接返回，由调用方判断
+		return resp, nil
+	}
+	if resp != nil {
+		resp.Body.Close()
+	}
+	return nil, err
 }

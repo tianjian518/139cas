@@ -1,6 +1,7 @@
 package _139
 
 import (
+	"bytes"
 	"context"
 	"encoding/xml"
 	"fmt"
@@ -930,25 +931,24 @@ func (d *Yun139) legacyPut(ctx context.Context, dstDir model.Obj, stream model.F
 			start := i * partSize
 			byteSize := min(size-start, partSize)
 
-			limitReader := io.LimitReader(rateLimited, byteSize)
-			r := io.TeeReader(limitReader, p)
-			req, err := http.NewRequestWithContext(ctx, http.MethodPost, resp.Data.UploadResult.RedirectionURL, r)
+			// 先把这一分片读入内存（同时更新进度），便于在 429/5xx 时安全重放
+			var partBuf bytes.Buffer
+			if _, err := io.Copy(&partBuf, io.TeeReader(io.LimitReader(rateLimited, byteSize), p)); err != nil {
+				return fmt.Errorf("buffer upload part: %w", err)
+			}
+			partHeaders := map[string]string{
+				"Content-Type": "text/plain;name=" + unicode(stream.GetName()),
+				"contentSize":  strconv.FormatInt(size, 10),
+				"range":        fmt.Sprintf("bytes=%d-%d", start, start+byteSize-1),
+				"uploadtaskID": resp.Data.UploadResult.UploadTaskID,
+				"rangeType":    "0",
+			}
+			res, err := do139Upload(ctx, http.MethodPost, resp.Data.UploadResult.RedirectionURL, partHeaders, partBuf.Bytes())
 			if err != nil {
 				return err
 			}
-			req.Header.Set("Content-Type", "text/plain;name="+unicode(stream.GetName()))
-			req.Header.Set("contentSize", strconv.FormatInt(size, 10))
-			req.Header.Set("range", fmt.Sprintf("bytes=%d-%d", start, start+byteSize-1))
-			req.Header.Set("uploadtaskID", resp.Data.UploadResult.UploadTaskID)
-			req.Header.Set("rangeType", "0")
-			req.ContentLength = byteSize
-
-			res, err := base.HttpClient.Do(req)
-			if err != nil {
-				return err
-			}
+			defer res.Body.Close()
 			if res.StatusCode != http.StatusOK {
-				res.Body.Close()
 				return fmt.Errorf("unexpected status code: %d", res.StatusCode)
 			}
 			bodyBytes, err := io.ReadAll(res.Body)
