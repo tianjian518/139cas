@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"strings"
 	"time"
@@ -77,6 +78,9 @@ func do139Execute(req *resty.Request, method, url string) (*resty.Response, erro
 			if wait > yun139RetryWaitMax {
 				wait = yun139RetryWaitMax
 			}
+			// 加少量 jitter（最多 25%）避免并发分片同时撞限流后同步重试
+			jitter := time.Duration(rand.Int63n(int64(wait) / 4))
+			wait += jitter
 			log.Warnf("[139] 接口临时失败，%s 后第 %d/%d 次重试: %s %s (err=%v)",
 				wait, attempt, yun139MaxRetry, method, url, err)
 			time.Sleep(wait)
@@ -109,9 +113,16 @@ func do139Upload(ctx context.Context, method, url string, headers map[string]str
 			if wait > yun139RetryWaitMax {
 				wait = yun139RetryWaitMax
 			}
+			// 加少量 jitter（最多 25%）避免并发分片同时撞限流后同步重试
+			jitter := time.Duration(rand.Int63n(int64(wait) / 4))
+			wait += jitter
 			log.Warnf("[139] 上传分片临时失败，%s 后第 %d/%d 次重试: %s %s (err=%v)",
 				wait, attempt, yun139MaxRetry, method, url, err)
-			time.Sleep(wait)
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(wait):
+			}
 		}
 		req, reqErr := http.NewRequestWithContext(ctx, method, url, bytes.NewReader(body))
 		if reqErr != nil {

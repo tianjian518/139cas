@@ -246,6 +246,9 @@ func (d *Yun139) requestRoute(data interface{}, resp interface{}) ([]byte, error
 	var e BaseResp
 	req.SetResult(&e)
 	res, err := do139Execute(req, http.MethodPost, url)
+	if err != nil {
+		return nil, err
+	}
 	log.Debugln(res.String())
 	if !e.Success {
 		return nil, errors.New(e.Message)
@@ -765,12 +768,13 @@ func (d *Yun139) uploadPersonalParts(ctx context.Context, partInfos []PartInfo, 
 		if err != nil {
 			return err
 		}
-		defer res.Body.Close()
 		log.Debugf("[139] uploaded: %+v", res)
 		if res.StatusCode != http.StatusOK {
 			body, _ := io.ReadAll(res.Body)
+			res.Body.Close()
 			return fmt.Errorf("unexpected status code: %d, body: %s", res.StatusCode, string(body))
 		}
+		res.Body.Close()
 	}
 	return nil
 }

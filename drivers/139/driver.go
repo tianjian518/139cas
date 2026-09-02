@@ -947,11 +947,13 @@ func (d *Yun139) legacyPut(ctx context.Context, dstDir model.Obj, stream model.F
 			if err != nil {
 				return err
 			}
-			defer res.Body.Close()
 			if res.StatusCode != http.StatusOK {
-				return fmt.Errorf("unexpected status code: %d", res.StatusCode)
+				body, _ := io.ReadAll(res.Body)
+				res.Body.Close()
+				return fmt.Errorf("unexpected status code: %d, body: %s", res.StatusCode, string(body))
 			}
 			bodyBytes, err := io.ReadAll(res.Body)
+			res.Body.Close()
 			if err != nil {
 				return fmt.Errorf("error reading response body: %v", err)
 			}
