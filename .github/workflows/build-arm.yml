@@ -25,6 +25,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Determine version
+        run: |
+          set -e
+          INPUT_VER="${{ github.event.inputs.version || '' }}"
+          if [ -n "$INPUT_VER" ]; then
+            VERSION="$INPUT_VER"
+          else
+            # 自动触发时取最新 tag，避免硬编码导致版本号失真
+            VERSION=$(git describe --tags --abbrev=0 2>/dev/null || echo v0.0.0)
+          fi
+          echo "Using version: $VERSION"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
@@ -47,7 +60,6 @@ jobs:
       - name: Cross-compile arm64 binary
         run: |
           set -e
-          VERSION=v0.0.0-u202f-fix
           COMMIT=$(git rev-parse --short HEAD)
           CGO_ENABLED=0 GOARCH=arm64 go build -tags jsoniter \
             -ldflags="-w -s -X github.com/OpenListTeam/OpenList/v4/internal/conf.Version=$VERSION -X github.com/OpenListTeam/OpenList/v4/internal/conf.GitCommit=$COMMIT" \
@@ -56,7 +68,6 @@ jobs:
       - name: Cross-compile arm/v7 binary
         run: |
           set -e
-          VERSION=v0.0.0-u202f-fix
           COMMIT=$(git rev-parse --short HEAD)
           CGO_ENABLED=0 GOARCH=arm GOARM=7 go build -tags jsoniter \
             -ldflags="-w -s -X github.com/OpenListTeam/OpenList/v4/internal/conf.Version=$VERSION -X github.com/OpenListTeam/OpenList/v4/internal/conf.GitCommit=$COMMIT" \
@@ -97,7 +108,7 @@ jobs:
         run: |
           set -e
           REPO=${{ env.REPO }}
-          VERSION=${{ github.event.inputs.version || 'u202f-fix' }}
+          VERSION=${{ env.VERSION }}
           # 拉取当前 :latest，保留除 arm64 / arm/v7 之外的其余架构 digest
           docker manifest inspect "$REPO:latest" > /tmp/cur.json
           NONARM=$(python3 - <<'PY'
