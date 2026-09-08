@@ -46,6 +46,18 @@ func initUser() {
 		} else {
 			utils.Log.Fatalf("[init user] Failed to get admin user: %v", err)
 		}
+	} else if len(envpass) > 0 && !flags.Dev {
+		// The admin user already exists. If OPENLIST_ADMIN_PASSWORD is set,
+		// reset the admin password on every startup. This makes it possible
+		// to recover the admin password from the NAS/container UI (just edit
+		// the env var and restart) without any SSH access.
+		// NOTE: the env var always wins over a password changed in the web UI.
+		admin.SetPassword(envpass)
+		if err := op.UpdateUser(admin); err != nil {
+			utils.Log.Errorf("[init user] Failed to reset admin password from OPENLIST_ADMIN_PASSWORD: %v", err)
+		} else {
+			fmt.Println("Admin password has been reset from OPENLIST_ADMIN_PASSWORD environment variable.")
+		}
 	}
 	_, err = op.GetGuest()
 	if err != nil {
