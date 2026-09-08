@@ -29,6 +29,7 @@ CAS 是一个**占位文件**，本身只有几百字节，记录着真实文件
 | `cas_ext_allowlist` | 空 | 扩展名白名单，留空表示全部允许。例：`mp4,mkv,iso,zip` |
 | `cas_download_restore` | 关 | 开启后通过 `/d/*` 下载 `.cas` 会还原并返回真实文件 |
 | `cas_delete_permanently` | 关 | 删除源文件时尝试绕过回收站，失败自动回退普通删除 |
+| `transfer_cas` | 关 | **跨盘搬运时**生成 CAS：本存储作为源端（文件被复制/移动到别的网盘）时，在搬运途中顺路算出 md5+sha1，目标盘写成功后在夸克原目录生成 `.cas`。配合 `delete_source` 会删掉夸克侧原文件。**不产生额外流量**，详见下方「跨盘搬运时生成 CAS」 |
 | `use_play_direct_link` | 关 | 视频播放（含 CAS 还原播放）优先走网页端原画播放接口，获取免 Cookie 直链供 OpenList 302 直连，不再本机代理转流；拿不到原画自动回退代理模式 |
 
 配置语义与 139 驱动完全一致，无需重新学习。
@@ -55,6 +56,47 @@ cas_delete_permanently  = true   # 可选，见下方注意事项
 白名单建议只填媒体扩展名——避免给小文件也生成一份 `.cas`，徒增文件数量却没有收益。
 
 **只播放、不删源文件**：`generate_cas = true`，`delete_source = false`。源文件保留，`.cas` 作为冗余副本，安全但不省空间。
+
+## 跨盘搬运时生成 CAS（`transfer_cas`）
+
+`generate_cas` 只在**上传到夸克**这条链路上生效。如果你要的是**把夸克里的存量影视搬到移动云盘（139）/ 115 等其它网盘，搬完让夸克这边的原文件瘦身**，就开 `transfer_cas`。
+
+```
+generate_cas       = true
+delete_source      = true
+transfer_cas       = true
+cas_ext_allowlist  = mp4,mkv,avi,mov,ts,wmv,m4v
+```
+
+### 为什么能做到"零额外流量"
+
+跨存储搬运（夸克 → 139）走 `internal/fs/copy_move.go` 的 `FileTransferTask`：
+
+```
+op.Link(夸克) → 拿到下载流 → stream.NewSeekableStream → op.Put(139)
+```
+
+字节必然从夸克流到 OpenList 服务器再上传，所以可以在这条流上挂哈希器。
+
+而夸克秒传**强制要求 sha1**（只给 md5 会返回 `400 Bad Parameter: [sha1 is null!]`），夸克又没有任何接口能返回已存在文件的 sha1 —— 所以必须读一遍文件自己算。搬运本来就这一遍，正好顺路。
+
+关键在于不会多读一次：移动云盘驱动 `drivers/139/driver.go` 的 `personalPut` 第一件事就是 `streamPkg.CacheFullAndHash(stream, &up, utils.SHA256)`，**本来就会把整条流完整读一遍并缓存**。本特性在 `op.Put` 之前先调 `ss.CacheFullAndWriter(nil, hasher)`，数据落进同一个本地缓存、md5+sha1 算好；139 之后再读就是读本地缓存。
+
+**一次下载 → 两边哈希都拿到 → 夸克侧生成 `.cas` → 删原文件。** 相比纯搬运，只多了一次 CPU 哈希计算。
+
+### 执行顺序与安全边界
+
+1. 目标盘 `Put` **成功之后**才动夸克这边。搬运失败 → 不生成、不删除。
+2. `.cas` **落盘成功之后**才删原文件。`.cas` 上传失败 → 原文件原样保留。
+3. md5 / sha1 缺失、或哈希字节数与文件大小对不上 → 直接跳过，不写废 `.cas`。
+4. 收尾失败**只记日志，不让任务变红** —— 否则会误以为没搬过去而重试，白白再下一遍。
+5. `move` 任务不触发（源端本来就要删，转 CAS 无意义）。
+6. 扩展名白名单与 `generate_cas` 共用 `cas_ext_allowlist`。
+
+### 两个提醒
+
+- **内存**：搬运过程中整文件会进入 OpenList 进程的匿名映射内存。搬 30G 的片子就需要 30G 虚拟内存。**这不是本特性引入的**——139 上传原本就要缓存整条流算 SHA256，但值得确认服务器内存/swap 够用。
+- **先小范围验证**：夸克的去重是引用计数型（最后一个引用删掉后数据会被回收），不像 139 是"删索引留数据"。务必先用一两个文件跑通 `搬运 → 生成 .cas → 删原文件 → 点 .cas 还原成功` 的完整链路，再批量上量。
 
 ## 工作原理
 

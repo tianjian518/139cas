@@ -6,6 +6,7 @@ import (
 	stdpath "path"
 	"time"
 
+	"github.com/OpenListTeam/OpenList/v4/internal/casmeta"
 	"github.com/OpenListTeam/OpenList/v4/internal/conf"
 	"github.com/OpenListTeam/OpenList/v4/internal/errs"
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
@@ -17,6 +18,7 @@ import (
 	"github.com/OpenListTeam/OpenList/v4/server/common"
 	"github.com/OpenListTeam/tache"
 	"github.com/pkg/errors"
+	log "github.com/sirupsen/logrus"
 )
 
 type taskType uint8
@@ -260,7 +262,59 @@ func (t *FileTransferTask) RunWithNextTaskCallback(f func(nextTask *FileTransfer
 	}
 	t.SetTotalBytes(ss.GetSize())
 	t.Status = "uploading"
-	return op.Put(context.WithValue(t.Ctx(), conf.SkipHookKey, struct{}{}), t.DstStorage, t.DstActualPath, ss, t.SetProgress)
+
+	// 源端 CAS：夸克作为源端搬出时，顺路把源文件的 md5+sha1 算出来。
+	// 目标盘驱动（139 / 115 等）内部本来就会 CacheFullAndHash 把整条流完整读一遍，
+	// 所以这里先过一遍哈希器并把数据落到本地缓存，后续 Put 直接从缓存读，
+	// 不会产生第二次下载。
+	finishSrcCAS := t.prepareSourceCAS(ss, srcObj)
+
+	if err = op.Put(context.WithValue(t.Ctx(), conf.SkipHookKey, struct{}{}), t.DstStorage, t.DstActualPath, ss, t.SetProgress); err != nil {
+		return err
+	}
+	if finishSrcCAS != nil {
+		if casErr := finishSrcCAS(); casErr != nil {
+			// 文件已经安全落在目标盘了。CAS 收尾失败只记日志：
+			// 不能让任务变红（否则会误以为没搬过去而重试，白白再下一遍），
+			// 也绝不能走到删原文件的分支。
+			log.Errorf("[cas] 源端生成 CAS 失败，原文件已保留: %v", casErr)
+		}
+	}
+	return nil
+}
+
+// sourceCASSink 由【源端存储】实现：跨盘搬出成功后，把本地原文件原地转成 .cas 并删除。
+// 在调用点定义，避免 casmeta / driver 包之间出现循环依赖。
+type sourceCASSink interface {
+	TransferCASEnabled(name string) bool
+	SaveTransferCAS(ctx context.Context, dir model.Obj, obj model.Obj, md5, sha1 string) error
+}
+
+// prepareSourceCAS 如果源存储支持"搬出后转 CAS"，先把源流完整过一遍哈希器。
+// 返回的回调必须在【目标盘 Put 成功之后】才能调用。
+func (t *FileTransferTask) prepareSourceCAS(ss *stream.SeekableStream, srcObj model.Obj) func() error {
+	sink, ok := t.SrcStorage.(sourceCASSink)
+	// move 任务源端本来就要删除，转 CAS 没有意义
+	if !ok || t.TaskType == move || !sink.TransferCASEnabled(srcObj.GetName()) {
+		return nil
+	}
+	h := casmeta.NewTransferHasher()
+	if _, err := ss.CacheFullAndWriter(nil, h); err != nil {
+		log.Warnf("[cas] 搬运途中计算哈希失败，跳过源端 CAS: %v", err)
+		return nil
+	}
+	if h.Written() != ss.GetSize() {
+		log.Warnf("[cas] 哈希字节数不符 (%d != %d)，跳过源端 CAS", h.Written(), ss.GetSize())
+		return nil
+	}
+	parentPath := stdpath.Dir(t.SrcActualPath)
+	return func() error {
+		dir, err := op.Get(t.Ctx(), t.SrcStorage, parentPath)
+		if err != nil {
+			return err
+		}
+		return sink.SaveTransferCAS(t.Ctx(), dir, srcObj, h.MD5(), h.SHA1())
+	}
 }
 
 var (

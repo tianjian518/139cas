@@ -148,6 +148,47 @@ func (d *QuarkOrUC) deleteSource(ctx context.Context, dstDir model.Obj, uploaded
 	return d.deletePermanently(ctx, uploadedObj)
 }
 
+// TransferCASEnabled 判断"夸克作为源端搬出"之后，是否要把夸克侧的原文件转成 .cas。
+//
+// 与 shouldUploadCAS 的区别：shouldUploadCAS 管的是"上传到夸克"这条链路，
+// 这里管的是"从夸克下载/搬出到别的网盘"这条链路。两者共用同一个扩展名白名单。
+func (d *QuarkOrUC) TransferCASEnabled(name string) bool {
+	return d.TransferCAS && !isCASName(name) && casmeta.ExtAllowed(name, d.CASExtAllowlist)
+}
+
+// SaveTransferCAS 用搬运途中顺路算出的 md5+sha1，在夸克原目录生成 .cas 占位文件，
+// 然后把夸克侧的原文件删掉。
+//
+// 调用方必须保证：目标存储已经上传成功。这里只负责夸克这一侧的收尾。
+// 设计原则：.cas 没真正落盘之前绝不删原文件；任何一步失败都直接返回错误。
+func (d *QuarkOrUC) SaveTransferCAS(ctx context.Context, dir model.Obj, obj model.Obj, md5Str, sha1Str string) error {
+	info := &casUploadInfo{
+		Provider: casProviderQuark,
+		Name:     obj.GetName(),
+		Size:     obj.GetSize(),
+		MD5:      md5Str,
+		SHA1:     sha1Str,
+	}
+	// 缺 md5 或 sha1 的 .cas 是废文件，还原必失败，直接拒绝
+	if err := d.validateCASInfo(info); err != nil {
+		return err
+	}
+	if _, err := d.uploadCAS(ctx, dir, info); err != nil {
+		return err
+	}
+	if !d.shouldDeleteSource() {
+		return nil
+	}
+	target := obj
+	if target.GetID() == "" {
+		var err error
+		if target, err = d.findFileByName(ctx, obj.GetName(), dir.GetID()); err != nil {
+			return err
+		}
+	}
+	return d.deletePermanently(ctx, target)
+}
+
 // deletePermanently 尝试从网盘彻底删除文件（不进回收站）。
 // 夸克的 /file/delete 用 action_type 区分：1 为移入回收站，2 为彻底删除。
 // 彻底删除属非官方用法，失败时回退到普通删除，保证不会比原来更糟。

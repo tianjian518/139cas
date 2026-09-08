@@ -19,6 +19,7 @@ type Addition struct {
 	CASExtAllowlist       string `json:"cas_ext_allowlist" help:"CAS extension allowlist. Empty means all extensions are allowed. Example: mp4,mkv,iso,zip"`
 	CASDownloadRestore    bool   `json:"cas_download_restore" help:"When enabled, downloading .cas files via /d/* will restore and return the real file instead of raw CAS metadata"`
 	CASDeletePermanently  bool   `json:"cas_delete_permanently" help:"When deleting the source file after CAS generation, try to bypass the recycle bin (action_type=2). Falls back to normal delete on failure"`
+	TransferCAS           bool   `json:"transfer_cas" help:"When this storage is the SOURCE of a cross-storage transfer (e.g. copying files out to another cloud drive), hash the file while it is being transferred and generate a .cas in the original Quark folder afterwards. Costs no extra traffic. Enable delete_source as well to remove the original file once the .cas is safely created"`
 	UsePlayDirectLink     bool   `json:"use_play_direct_link" help:"Prefer /file/v2/play web API for video playback. Its links carry no Cookie/Referer headers, so OpenList can 302-redirect clients directly instead of proxying (much less bandwidth on the server). Falls back to the download link on failure. URL validity is not officially guaranteed — verify playback in your client first"`
 }
 
