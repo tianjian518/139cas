@@ -293,10 +293,21 @@ func (d *QuarkOrUC) linkCASVideo(ctx context.Context, file model.Obj, args model
 	if err != nil {
 		return nil, err
 	}
-	link, err := d.getDownloadLink(tempObj)
-	if err != nil {
-		_ = d.deleteTemp(context.TODO(), tempObj)
-		return nil, err
+	// With UsePlayDirectLink enabled, prefer the cookie-free /file/v2/play URL
+	// so OpenList can 302-redirect instead of proxying; fall back on failure.
+	var link *model.Link
+	if d.UsePlayDirectLink {
+		link, err = d.getPlayLink(ctx, tempObj)
+		if err != nil || link == nil {
+			utils.Log.Warnf("casQuarkPlayLinkFallback:%v", err)
+		}
+	}
+	if link == nil {
+		link, err = d.getDownloadLink(tempObj)
+		if err != nil {
+			_ = d.deleteTemp(context.TODO(), tempObj)
+			return nil, err
+		}
 	}
 	go func() {
 		if err := d.deleteTemp(context.TODO(), tempObj); err != nil {

@@ -67,6 +67,16 @@ func (d *QuarkOrUC) Link(ctx context.Context, file model.Obj, args model.LinkArg
 	}
 	f, ok := file.(*File)
 
+	if ok && d.UsePlayDirectLink && f.Category == 1 && f.Size > 0 {
+		// /file/v2/play returns cookie-free URLs, allowing OpenList to
+		// 302-redirect instead of proxying. Fall back on failure.
+		link, err := d.getPlayLink(ctx, file)
+		if err == nil && link != nil {
+			return link, nil
+		}
+		log.Warnf("[quark] getPlayLink failed, falling back to download link: %v", err)
+	}
+
 	if ok && d.UseTransCodingAddress && d.config.Name == "Quark" && f.Category == 1 && f.Size > 0 {
 		return d.getTranscodingLink(file)
 	}

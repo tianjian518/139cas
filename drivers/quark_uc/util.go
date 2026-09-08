@@ -167,6 +167,60 @@ func (d *QuarkOrUC) getTranscodingLink(file model.Obj) (*model.Link, error) {
 	return nil, errors.New("no link found")
 }
 
+// getPlayLink 走网页端播放器同款的原画播放接口 /file/v2/play。
+// 与 download 接口不同，它返回的 CDN 直链无需附加 Cookie/Referer/UA 头，
+// 因此 OpenList 可以直接 302 给播放器，客户端直连夸克 CDN 而不经过本机代理。
+// 注意：该行为未被官方文档保证，返回的 URL 是否真的免 Cookie 需实测，
+// 所以由 UsePlayDirectLink 开关控制，默认关闭。
+func (d *QuarkOrUC) getPlayLink(ctx context.Context, file model.Obj) (*model.Link, error) {
+	data := base.Json{
+		"fid":         file.GetID(),
+		"resolutions": "low,normal,high,super,2k,4k",
+		"supports":    "fmp4_av,m3u8",
+	}
+	var resp TranscodingResp
+	_, err := d.request("/file/v2/play", http.MethodPost, func(req *resty.Request) {
+		req.SetBody(data).SetContext(ctx)
+	}, &resp)
+	if err != nil {
+		return nil, err
+	}
+
+	// 只接受 resolution == "default"（原画 = 原文件字节）。
+	// 其他档位是转码流，画质有损；宁可报错回退到下载直链（代理播放原画），
+	// 也不能让用户在不知情中看低画质。
+	for _, info := range resp.Data.VideoList {
+		if info.VideoInfo.URL == "" {
+			continue
+		}
+		if info.Resolution != "default" && info.Resolution != "" {
+			continue
+		}
+		size := info.VideoInfo.Size
+		if size <= 0 {
+			size = file.GetSize()
+		}
+		// 原画字节数应与文件大小一致；差异过大说明实际返回的是转码档
+		if file.GetSize() > 0 && size > 0 {
+			diff := size - file.GetSize()
+			if diff < 0 {
+				diff = -diff
+			}
+			if diff*100 > file.GetSize() { // >1% 视为非原画
+				return nil, fmt.Errorf("play link is not the original quality (size %d != %d)", size, file.GetSize())
+			}
+		}
+		return &model.Link{
+			URL:           info.VideoInfo.URL,
+			ContentLength: size,
+			Concurrency:   3,
+			PartSize:      10 * utils.MB,
+		}, nil
+	}
+
+	return nil, errors.New("no original-quality play link found")
+}
+
 func (d *QuarkOrUC) upPre(file model.FileStreamer, parentId string) (UpPreResp, error) {
 	now := time.Now()
 	data := base.Json{
