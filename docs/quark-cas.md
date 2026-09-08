@@ -83,7 +83,10 @@ cas_delete_permanently  = true   # 可选，见下方注意事项
 
 4. **CAS 与源文件二选一**。开了 `delete_source` 后源文件就没了，如果后续秒传失败，文件不可恢复。**建议先小范围验证秒传确实可用，再批量开启。**
 
-5. **生效范围**：仅 `Quark` 和 `UC` 两个驱动。`QuarkOpen`（夸克开放平台）、`QuarkTV`、`UCTV` 是独立的驱动包，尚未适配 CAS。
+5. **生效范围**：仅 `Quark` 和 `UC` 两个驱动。`QuarkOpen`（夸克开放平台）、`QuarkTV`、`UCTV` 是独立的驱动包，且存在技术障碍无法适配：
+
+   - **QuarkTV / UCTV**：只读驱动（`Put` 直接返回 `errs.NotImplement`），不支持上传，也就没有"生成 CAS"和"秒传还原"的基础。
+   - **QuarkOpen**：开放平台的 `upload_pre` 要求 `proof_code1/2`——从文件指定偏移读取 8 字节做 base64（反作弊校验）。而 CAS 还原的场景恰恰**没有文件字节**，proof 无法生成，秒传请求会被拒绝。除非夸克官方放开 proof 校验，否则此路不通。
 
 ## 与 139 CAS 的差异
 
@@ -95,5 +98,5 @@ cas_delete_permanently  = true   # 可选，见下方注意事项
 
 ## 验证
 
-- 单元测��：`go test ./drivers/quark_uc/`（6 个用例，覆盖校验逻辑、编解码往返、白名单、播放开关、空流行为）
+- 单元测试：`go test ./drivers/quark_uc/`（6 个用例，覆盖校验逻辑、编解码往返、白名单、播放开关、空流行为）
 - 运行时已验证配置项正确注册进驱动元数据，管理后台可正常显示开关
