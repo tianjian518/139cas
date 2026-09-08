@@ -16,6 +16,7 @@ import (
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
 	"github.com/avast/retry-go"
 	"github.com/go-resty/resty/v2"
+	log "github.com/sirupsen/logrus"
 )
 
 type QuarkOrUC struct {
@@ -61,9 +62,12 @@ func (d *QuarkOrUC) List(ctx context.Context, dir model.Obj, args model.ListArgs
 }
 
 func (d *QuarkOrUC) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (*model.Link, error) {
-	f := file.(*File)
+	if d.shouldPlayCAS(file, args) {
+		return d.linkCASVideo(ctx, file, args)
+	}
+	f, ok := file.(*File)
 
-	if d.UseTransCodingAddress && d.config.Name == "Quark" && f.Category == 1 && f.Size > 0 {
+	if ok && d.UseTransCodingAddress && d.config.Name == "Quark" && f.Category == 1 && f.Size > 0 {
 		return d.getTranscodingLink(file)
 	}
 
@@ -129,7 +133,49 @@ func (d *QuarkOrUC) Remove(ctx context.Context, obj model.Obj) error {
 	return err
 }
 
-func (d *QuarkOrUC) Put(ctx context.Context, dstDir model.Obj, stream model.FileStreamer, up driver.UpdateProgress) error {
+func (d *QuarkOrUC) Put(ctx context.Context, dstDir model.Obj, stream model.FileStreamer, up driver.UpdateProgress) (model.Obj, error) {
+	sourceName := stream.GetName()
+	sourceSize := stream.GetSize()
+
+	// 上传目标本身是 .cas 时，直接还原为真实文件
+	preparedStream, restoredObj, handled, err := d.prepareCASPut(ctx, dstDir, stream)
+	if err != nil || handled {
+		return restoredObj, err
+	}
+	stream = preparedStream
+
+	newObj, md5Str, sha1Str, err := d.uploadFile(ctx, dstDir, stream, up)
+	if err != nil {
+		return nil, err
+	}
+	if !d.shouldUploadCAS(sourceName) {
+		return newObj, nil
+	}
+	info := &casUploadInfo{
+		Provider: casProviderQuark,
+		Name:     sourceName,
+		Size:     sourceSize,
+		MD5:      md5Str,
+		SHA1:     sha1Str,
+	}
+	casObj, err := d.uploadCAS(ctx, dstDir, info)
+	if err != nil {
+		// CAS 轻量占位上传失败（多为接口被限流）不应让整次上传失败：
+		// 真实文件已落盘，缺少 .cas 占位只是元信息不完整，可后续重试。
+		log.Warnf("[quark] CAS 占位上传失败（非致命，保留真实文件）: %v", err)
+		return newObj, nil
+	}
+	if casObj != nil && d.shouldDeleteSource() {
+		if err = d.deleteSource(ctx, dstDir, newObj, info); err != nil {
+			return nil, err
+		}
+		return casObj, nil
+	}
+	return newObj, nil
+}
+
+// uploadFile 执行真实的上传流程，并返回源文件的 md5 / sha1（用于生成 CAS）。
+func (d *QuarkOrUC) uploadFile(ctx context.Context, dstDir model.Obj, stream model.FileStreamer, up driver.UpdateProgress) (model.Obj, string, string, error) {
 	md5Str, sha1Str := stream.GetHash().GetHash(utils.MD5), stream.GetHash().GetHash(utils.SHA1)
 	var (
 		md5  hash.Hash
@@ -148,7 +194,7 @@ func (d *QuarkOrUC) Put(ctx context.Context, dstDir model.Obj, stream model.File
 	if len(writers) > 0 {
 		_, err := stream.CacheFullAndWriter(&up, io.MultiWriter(writers...))
 		if err != nil {
-			return err
+			return nil, "", "", err
 		}
 		if md5 != nil {
 			md5Str = hex.EncodeToString(md5.Sum(nil))
@@ -160,21 +206,21 @@ func (d *QuarkOrUC) Put(ctx context.Context, dstDir model.Obj, stream model.File
 	// pre
 	pre, err := d.upPre(stream, dstDir.GetID())
 	if err != nil {
-		return err
+		return nil, "", "", err
 	}
 	// hash
-	finish, err := d.upHash(md5Str, sha1Str, pre.Data.TaskId)
+	hashResp, err := d.upHashResp(md5Str, sha1Str, pre.Data.TaskId)
 	if err != nil {
-		return err
+		return nil, "", "", err
 	}
-	if finish {
+	if hashResp.Data.Finish {
 		up(100)
-		return nil
+		return newFileObj(hashResp.Data.Fid, stream.GetName(), stream.GetSize()), md5Str, sha1Str, nil
 	}
 	// part up
 	ss, err := streamPkg.NewStreamSectionReader(stream, pre.Metadata.PartSize, &up)
 	if err != nil {
-		return err
+		return nil, "", "", err
 	}
 	total := stream.GetSize()
 	partSize := int64(pre.Metadata.PartSize)
@@ -182,13 +228,13 @@ func (d *QuarkOrUC) Put(ctx context.Context, dstDir model.Obj, stream model.File
 	md5s := make([]string, 0, uploadNums)
 	for partIndex := range uploadNums {
 		if utils.IsCanceled(ctx) {
-			return ctx.Err()
+			return nil, "", "", ctx.Err()
 		}
 		offset := int64(partIndex) * partSize
 		size := min(partSize, total-offset)
 		rd, err := ss.GetSectionReader(offset, size)
 		if err != nil {
-			return err
+			return nil, "", "", err
 		}
 		err = retry.Do(func() error {
 			rd.Seek(0, io.SeekStart)
@@ -209,17 +255,20 @@ func (d *QuarkOrUC) Put(ctx context.Context, dstDir model.Obj, stream model.File
 			retry.Delay(time.Second))
 		ss.FreeSectionReader(rd)
 		if err != nil {
-			return err
+			return nil, "", "", err
 		}
 		up(95 * float64(offset+size) / float64(total))
 	}
 	up(97)
 	err = d.upCommit(pre, md5s)
 	if err != nil {
-		return err
+		return nil, "", "", err
 	}
 	defer up(100)
-	return d.upFinish(pre)
+	if err = d.upFinish(pre); err != nil {
+		return nil, "", "", err
+	}
+	return newFileObj(pre.Data.Fid, stream.GetName(), stream.GetSize()), md5Str, sha1Str, nil
 }
 
 func (d *QuarkOrUC) GetDetails(ctx context.Context) (*model.StorageDetails, error) {

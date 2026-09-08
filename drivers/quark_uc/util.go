@@ -188,6 +188,14 @@ func (d *QuarkOrUC) upPre(file model.FileStreamer, parentId string) (UpPreResp, 
 }
 
 func (d *QuarkOrUC) upHash(md5, sha1, taskId string) (bool, error) {
+	resp, err := d.upHashResp(md5, sha1, taskId)
+	if err != nil {
+		return false, err
+	}
+	return resp.Data.Finish, nil
+}
+
+func (d *QuarkOrUC) upHashResp(md5, sha1, taskId string) (*HashResp, error) {
 	data := base.Json{
 		"md5":     md5,
 		"sha1":    sha1,
@@ -198,7 +206,7 @@ func (d *QuarkOrUC) upHash(md5, sha1, taskId string) (bool, error) {
 	_, err := d.request("/file/update/hash", http.MethodPost, func(req *resty.Request) {
 		req.SetBody(data)
 	}, &resp)
-	return resp.Data.Finish, err
+	return &resp, err
 }
 
 func (d *QuarkOrUC) upPart(ctx context.Context, pre UpPreResp, mineType string, partNumber int, bytes io.Reader) (string, error) {

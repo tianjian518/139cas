@@ -13,6 +13,12 @@ type Addition struct {
 	UseTransCodingAddress bool   `json:"use_transcoding_address" help:"You can watch the transcoded video and support 302 redirection" required:"true" default:"false"`
 	OnlyListVideoFile     bool   `json:"only_list_video_file" default:"false"`
 	AdditionVersion       int
+	GenerateCAS           bool   `json:"generate_cas" help:"After upload, generate a same-name .cas file in the same directory"`
+	DeleteSource          bool   `json:"delete_source" help:"After generating the .cas file, delete the uploaded source file"`
+	RestoreSourceFromCAS  bool   `json:"restore_source_from_cas" help:"Restore source file from .cas metadata"`
+	CASExtAllowlist       string `json:"cas_ext_allowlist" help:"CAS extension allowlist. Empty means all extensions are allowed. Example: mp4,mkv,iso,zip"`
+	CASDownloadRestore    bool   `json:"cas_download_restore" help:"When enabled, downloading .cas files via /d/* will restore and return the real file instead of raw CAS metadata"`
+	CASDeletePermanently  bool   `json:"cas_delete_permanently" help:"When deleting the source file after CAS generation, try to bypass the recycle bin (action_type=2). Falls back to normal delete on failure"`
 }
 
 type Conf struct {
