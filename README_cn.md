@@ -72,7 +72,7 @@ OpenList 是一个由 OpenList 团队独立维护的开源项目，遵循 AGPL-3
   - [x] [百度网盘](http://pan.baidu.com)
   - [x] [Terabox](https://www.terabox.com/main)
   - [x] [UC网盘](https://drive.uc.cn)
-  - [x] [夸克网盘](https://pan.quark.cn)
+  - [x] [夸克网盘](https://pan.quark.cn)（支持 CAS 占位与零流量播放，见 [使用说明](./docs/quark-cas.md)）
   - [x] [迅雷网盘](https://pan.xunlei.com)
   - [x] [蓝奏云](https://www.lanzou.com)
   - [x] [蓝奏云优享版](https://www.ilanzou.com)
