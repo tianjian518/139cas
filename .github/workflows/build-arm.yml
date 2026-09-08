@@ -131,14 +131,21 @@ jobs:
           import json
           d=json.load(open('/tmp/cur.json'))
           out=[]
+          seen=set()
           for m in d.get('manifests', []):
               p=m.get('platform')
+              # 跳过无 OS/架构信息的索引或废料层，重组时带上会被 registry 拒收
               if not p:
                   continue
-              a=p.get('architecture'); v=p.get('variant','')
-              if a=='arm64' or (a=='arm' and v in ('v7','7','')):
+              a=p.get('architecture'); os_name=p.get('os','')
+              v=p.get('variant','')
+              # 只保留带完整平台信息的非 Arm 层，同时按 digest 去重
+              if (a=='arm64' or (a=='arm' and v in ('v7','7',''))) or os_name=='unknown' or a=='unknown':
                   continue
-              out.append(m['digest'])
+              dg=m['digest']
+              if dg not in seen:
+                  seen.add(dg)
+                  out.append(dg)
           print(' '.join(out))
           PY
           )
