@@ -24,6 +24,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # 拉全量历史与 tags，保证 git describe 能取到最新版本号
+          fetch-depth: 0
 
       - name: Determine version
         run: |
@@ -43,15 +46,28 @@ jobs:
         with:
           go-version: '1.24'
 
-      - name: Download frontend dist (rolling)
+      - name: Download frontend dist (rolling, fallback to latest release)
         run: |
           set -e
           FRONTEND_REPO=OpenListTeam/OpenList-Frontend
-          ASSET_URL=$(curl -fsSL -H "Accept: application/vnd.github.v3+json" \
-            "https://api.github.com/repos/$FRONTEND_REPO/releases/tags/rolling" \
-            | python3 -c "import sys,json; d=json.load(sys.stdin); urls=[a['browser_download_url'] for a in d.get('assets',[]) if 'openlist-frontend-dist' in a['name'] and 'lite' not in a['name'] and a['name'].endswith('.tar.gz')]; print(urls[0] if urls else '')")
+          AUTH="Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}"
+          fetch_rolling() {
+            ASSET_URL=$(curl -fsSL -H "$AUTH" -H "Accept: application/vnd.github.v3+json" \
+              "https://api.github.com/repos/$FRONTEND_REPO/releases/tags/rolling" \
+              | python3 -c "import sys,json; d=json.load(sys.stdin); urls=[a['browser_download_url'] for a in d.get('assets',[]) if 'openlist-frontend-dist' in a['name'] and 'lite' not in a['name'] and a['name'].endswith('.tar.gz')]; print(urls[0] if urls else '')" 2>/dev/null || true)
+          }
+          fetch_release() {
+            ASSET_URL=$(curl -fsSL -H "$AUTH" -H "Accept: application/vnd.github.v3+json" \
+              "https://api.github.com/repos/$FRONTEND_REPO/releases/latest" \
+              | python3 -c "import sys,json; d=json.load(sys.stdin); urls=[a['browser_download_url'] for a in d.get('assets',[]) if 'openlist-frontend-dist' in a['name'] and 'lite' not in a['name'] and a['name'].endswith('.tar.gz')]; print(urls[0] if urls else '')")
+          }
+          fetch_rolling
+          if [ -z "$ASSET_URL" ]; then
+            echo "rolling release unavailable, falling back to latest release"
+            fetch_release
+          fi
           echo "dist asset: $ASSET_URL"
-          [ -n "$ASSET_URL" ] || exit 1
+          [ -n "$ASSET_URL" ] || { echo "no frontend asset found in rolling nor latest release"; exit 1; }
           curl -fsSL "$ASSET_URL" -o dist.tar.gz
           rm -rf public/dist && mkdir -p public/dist
           tar -zxvf dist.tar.gz -C public/dist
