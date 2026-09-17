@@ -97,11 +97,37 @@ AssertStaticBinary() {
 }
 
 FetchWebRolling() {
-  pre_release_json=$(eval "curl -fsSL --max-time 2 $githubAuthArgs -H \"Accept: application/vnd.github.v3+json\" \"https://api.github.com/repos/$frontendRepo/releases/tags/rolling\"")
-  pre_release_assets=$(echo "$pre_release_json" | jq -r '.assets[].browser_download_url')
-  
-  # There is no lite for rolling
-  pre_release_tar_url=$(echo "$pre_release_assets" | grep "openlist-frontend-dist" | grep -v "lite" | grep "\.tar\.gz$")
+  # The rolling prerelease tag was renamed upstream (rolling -> edge).
+  # Try each candidate in order, and fall back to the newest stable release
+  # if none of them provide a usable standard frontend tarball.
+  pre_release_tar_url=""
+  for candidate in rolling edge beta-media; do
+    pre_release_json=$(eval "curl -fsSL --max-time 5 $githubAuthArgs -H \"Accept: application/vnd.github.v3+json\" \"https://api.github.com/repos/$frontendRepo/releases/tags/${candidate}\"" 2>/dev/null || true)
+    [ -z "$pre_release_json" ] && continue
+    pre_release_assets=$(echo "$pre_release_json" | jq -r '.assets[].browser_download_url' 2>/dev/null || true)
+    # There is no lite for rolling
+    candidate_url=$(echo "$pre_release_assets" | grep "openlist-frontend-dist" | grep -v "lite" | grep "\.tar\.gz$" | head -n 1)
+    if [ -n "$candidate_url" ]; then
+      pre_release_tar_url="$candidate_url"
+      echo "using rolling candidate: ${candidate}"
+      break
+    fi
+  done
+
+  if [ -z "$pre_release_tar_url" ]; then
+    echo "no rolling/edge prerelease available, falling back to latest stable frontend"
+    release_json=$(eval "curl -fsSL --max-time 5 $githubAuthArgs -H \"Accept: application/vnd.github.v3+json\" \"https://api.github.com/repos/$frontendRepo/releases/latest\"")
+    release_assets=$(echo "$release_json" | jq -r '.assets[].browser_download_url')
+    if [ "$useLite" = true ]; then
+      pre_release_tar_url=$(echo "$release_assets" | grep "openlist-frontend-dist-lite" | grep "\.tar\.gz$" | head -n 1)
+    else
+      pre_release_tar_url=$(echo "$release_assets" | grep "openlist-frontend-dist" | grep -v "lite" | grep "\.tar\.gz$" | head -n 1)
+    fi
+    if [ -z "$pre_release_tar_url" ]; then
+      echo "ERROR: cannot find any usable frontend tarball"
+      return 1
+    fi
+  fi
 
   curl -fsSL "$pre_release_tar_url" -o dist.tar.gz
   rm -rf public/dist && mkdir -p public/dist
