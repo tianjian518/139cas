@@ -18,6 +18,7 @@ import (
 
 	"github.com/OpenListTeam/OpenList/v4/drivers/base"
 	"github.com/OpenListTeam/OpenList/v4/pkg/cookie"
+	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
 	"github.com/go-resty/resty/v2"
 	"github.com/google/uuid"
 	"golang.org/x/crypto/pbkdf2"
@@ -442,12 +443,34 @@ func (d *DoubaoNew) fetchBizAuth(dpop string, public bool) (string, error) {
 	}
 	var resp bizAuthResp
 	if err = json.Unmarshal(res.Body(), &resp); err != nil {
-		return "", err
+		return "", fmt.Errorf("[doubao_new] biz_auth 响应解析失败(status=%d body=%s): %w",
+			res.StatusCode(), previewBody(res.Body()), err)
 	}
 	if resp.Message != "success" || resp.Data.AccessToken == "" {
-		return "", fmt.Errorf("[doubao_new] %s: %s", resp.Message, resp.Data.Description)
+		desc := resp.Data.Description
+		// 把常见的服务端拒绝翻译成可操作的提示
+		hint := ""
+		switch desc {
+		case "非法应用", "缺少参数":
+			hint = "（请检查 app_id / auth_client_id 是否正确）"
+		case "非法请求":
+			hint = "（Cookie 中的 passport_csrf_token 缺失或已失效，请重新复制 Cookie）"
+		case "登录已过期", "未登录":
+			hint = "（Cookie 已失效，请在浏览器重新登录豆包后复制新 Cookie）"
+		}
+		return "", fmt.Errorf("[doubao_new] 续期被拒绝: %s: %s%s",
+			resp.Message, desc, hint)
 	}
 	return resp.Data.AccessToken, nil
+}
+
+// previewBody 用于在日志中展示一段响应体，便于排查非 JSON 响应（如风控页）。
+func previewBody(b []byte) string {
+	s := strings.TrimSpace(string(b))
+	if len(s) > 200 {
+		s = s[:200] + "..."
+	}
+	return s
 }
 
 func (d *DoubaoNew) refreshAuthorizationWithDPoP(dpop string) (string, error) {
@@ -499,8 +522,25 @@ func (d *DoubaoNew) resolveAuthorizationForRequest(method, rawURL string) (strin
 		return d.resolveAuthorization(), nil
 	}
 
+	// 以下检查原本是静默 return，导致配置不全时驱动退化成一个"到期即失效"的
+	// 静态 cookie 方案，且不给任何提示。改为在配置确实不完整时报错，
+	// 但为兼容历史配置（例如用户就是用静态 token），仅在日志中告警并回退。
 	if d.DPoPKeyPair == nil || strings.TrimSpace(d.Cookie) == "" || !d.ensureAuthAdditons() {
-		return d.resolveAuthorization(), nil
+		reason := "未知原因"
+		switch {
+		case d.DPoPKeyPair == nil:
+			reason = "Cookie 中缺少 feishu_dpop_keypair 或 dpop_key_secret 不正确"
+		case strings.TrimSpace(d.Cookie) == "":
+			reason = "Cookie 为空"
+		default:
+			reason = "自动续期参数不完整"
+		}
+		if auth := d.resolveAuthorization(); auth != "" {
+			utils.Log.Warnf("[doubao_new] token 已过期但无法续期（%s），本次仍使用旧 token；"+
+				"请修正配置，否则将持续失效", reason)
+			return auth, nil
+		}
+		return "", fmt.Errorf("[doubao_new] token 已过期且无法续期：%s", reason)
 	}
 
 	d.authRefreshMu.Lock()
@@ -517,12 +557,15 @@ func (d *DoubaoNew) resolveAuthorizationForRequest(method, rawURL string) (strin
 
 	newToken, err := d.refreshAuthorizationWithDPoP(refreshDpop)
 	if err != nil {
+		// 续期失败时回退旧 token，让调用方拿到上游的真实报错，同时留下可排查的日志。
 		if auth := d.resolveAuthorization(); auth != "" {
+			utils.Log.Errorf("[doubao_new] 自动续期失败，回退旧 token：%v", err)
 			return auth, nil
 		}
 		return "", err
 	}
 	d.Authorization = trimTokenScheme(newToken)
+	utils.Log.Infof("[doubao_new] token 自动续期成功")
 	return d.resolveAuthorization(), nil
 }
 

@@ -54,23 +54,62 @@ func (d *DoubaoNew) GetAddition() driver.Additional {
 }
 
 func (d *DoubaoNew) Init(ctx context.Context) error {
-	if cookieStr := strings.TrimSpace(d.Cookie); cookieStr != "" {
-		d.Cookie = cookieStr
-		auth := trimTokenScheme(cookie.GetStr(d.Cookie, "LARK_SUITE_ACCESS_TOKEN"))
-		if auth != "" {
-			d.Authorization = auth
-		}
-		dpop := strings.TrimSpace(cookie.GetStr(d.Cookie, "LARK_SUITE_DPOP"))
-		if dpop != "" {
-			d.DPoP = dpop
-		}
-		keypair := strings.TrimSpace(cookie.GetStr(d.Cookie, "feishu_dpop_keypair"))
-		if keypair != "" && d.DPoPKeySecret != "" {
-			d.DPoPKeyPairStr = keypair
-			d.DPoPKeyPair, _ = parseEncryptedDPoPKeyPair(keypair, d.DPoPKeySecret)
+	// 1) 用编译期常量补齐所有自动续期参数，用户只需填 Cookie。
+	//    允许用户显式覆盖，以便服务端策略变更时能紧急调整。
+	d.fillAuthDefaults()
+
+	cookieStr := strings.TrimSpace(d.Cookie)
+	if cookieStr == "" {
+		return errors.New("[doubao_new] 未填写 Cookie：请从浏览器复制豆包网页的完整 Cookie")
+	}
+	d.Cookie = cookieStr
+
+	auth := trimTokenScheme(cookie.GetStr(d.Cookie, "LARK_SUITE_ACCESS_TOKEN"))
+	if auth != "" {
+		d.Authorization = auth
+	}
+	dpop := strings.TrimSpace(cookie.GetStr(d.Cookie, "LARK_SUITE_DPOP"))
+	if dpop != "" {
+		d.DPoP = dpop
+	}
+
+	// 2) 解密 Cookie 中的 DPoP 私钥。这是自动续期的前提，失败必须让用户看见。
+	keypair := strings.TrimSpace(cookie.GetStr(d.Cookie, "feishu_dpop_keypair"))
+	if keypair == "" {
+		return errors.New("[doubao_new] Cookie 中缺少 feishu_dpop_keypair，无法自动续期：" +
+			"请在浏览器已登录豆包的状态下重新复制完整 Cookie（该键由豆包前端在首次访问时写入）")
+	}
+	d.DPoPKeyPairStr = keypair
+	key, err := parseEncryptedDPoPKeyPair(keypair, d.DPoPKeySecret)
+	if err != nil {
+		return fmt.Errorf("[doubao_new] 解密 feishu_dpop_keypair 失败（dpop_key_secret 可能不正确）：%w", err)
+	}
+	d.DPoPKeyPair = key
+
+	// 3) 续期还需要 CSRF token，缺失时提前告警而不是等到过期才暴露。
+	if strings.TrimSpace(cookie.GetStr(d.Cookie, "passport_csrf_token")) == "" {
+		return errors.New("[doubao_new] Cookie 中缺少 passport_csrf_token，无法自动续期：" +
+			"请重新复制完整 Cookie")
+	}
+
+	return nil
+}
+
+// fillAuthDefaults 为自动续期相关字段填入编译期常量。
+// 用户填写了自定义值时保留用户值。
+func (d *DoubaoNew) fillAuthDefaults() {
+	setIfEmpty := func(dst *string, def string) {
+		if strings.TrimSpace(*dst) == "" {
+			*dst = def
 		}
 	}
-	return nil
+	setIfEmpty(&d.AppID, DefaultAppID)
+	setIfEmpty(&d.DPoPKeySecret, DefaultDPoPKeySecret)
+	setIfEmpty(&d.AuthClientID, DefaultAuthClientID)
+	setIfEmpty(&d.AuthClientType, DefaultAuthClientType)
+	setIfEmpty(&d.AuthScope, DefaultAuthScope)
+	setIfEmpty(&d.AuthSDKSource, DefaultAuthSDKSource)
+	setIfEmpty(&d.AuthSDKVersion, DefaultAuthSDKVersion)
 }
 
 func (d *DoubaoNew) Drop(ctx context.Context) error {
