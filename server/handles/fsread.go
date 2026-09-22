@@ -5,6 +5,7 @@ import (
 	"fmt"
 	stdpath "path"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/OpenListTeam/OpenList/v4/internal/conf"
@@ -46,6 +47,9 @@ type ObjResp struct {
 	HashInfoStr  string                     `json:"hashinfo"`
 	HashInfo     map[*utils.HashType]string `json:"hash_info"`
 	MountDetails *model.StorageDetails      `json:"mount_details,omitempty"`
+	// CASSource 为 true 时表示本项是 .cas 秒传文件，Size 为原始文件大小
+	CASSource     bool   `json:"cas_source,omitempty"`
+	CASSourceName string `json:"cas_source_name,omitempty"`
 }
 
 type FsListResp struct {
@@ -111,13 +115,15 @@ func FsList(c *gin.Context, req *ListReq, user *model.User) {
 	total, objs := pagination(objs, &req.PageReq)
 	provider := "unknown"
 	var directUploadTools []string
-	if canWriteContentAtPath {
-		if storage, err := fs.GetStorage(reqPath, &fs.GetStoragesArgs{}); err == nil {
-			directUploadTools = op.GetDirectUploadTools(storage)
+	var storage driver.Driver
+	if st, err := fs.GetStorage(reqPath, &fs.GetStoragesArgs{}); err == nil {
+		storage = st
+		if canWriteContentAtPath {
+			directUploadTools = op.GetDirectUploadTools(st)
 		}
 	}
 	common.SuccessResp(c, FsListResp{
-		Content:            toObjsResp(objs, reqPath, isEncrypt(meta, reqPath)),
+		Content:            toObjsRespWithCAS(c.Request.Context(), objs, reqPath, isEncrypt(meta, reqPath), storage),
 		Total:              int64(total),
 		Readme:             getReadme(meta, reqPath),
 		Header:             getHeader(meta, reqPath),
@@ -228,11 +234,19 @@ func pagination(objs []model.Obj, req *model.PageReq) (int, []model.Obj) {
 }
 
 func toObjsResp(objs []model.Obj, parent string, encrypt bool) []ObjResp {
-	var resp []ObjResp
-	for _, obj := range objs {
+	return toObjsRespWithCAS(context.Background(), objs, parent, encrypt, nil)
+}
+
+// toObjsRespWithCAS 与 toObjsResp 一致，但对 .cas 秒传文件额外解析其原始文件名与大小。
+// 解析需要读取 .cas 内容（数 KB），因此并发执行并限制并发度。
+func toObjsRespWithCAS(ctx context.Context, objs []model.Obj, parent string, encrypt bool, storage driver.Driver) []ObjResp {
+	resp := make([]ObjResp, len(objs))
+	sizer, _ := storage.(driver.CASSourceSizer)
+	needsCAS := make([]int, 0, 8)
+	for i, obj := range objs {
 		thumb, _ := model.GetThumb(obj)
 		mountDetails, _ := model.GetStorageDetails(obj)
-		resp = append(resp, ObjResp{
+		resp[i] = ObjResp{
 			Name:         obj.GetName(),
 			Size:         obj.GetSize(),
 			IsDir:        obj.IsDir(),
@@ -244,9 +258,38 @@ func toObjsResp(objs []model.Obj, parent string, encrypt bool) []ObjResp {
 			Thumb:        thumb,
 			Type:         utils.GetObjType(obj.GetName(), obj.IsDir()),
 			MountDetails: mountDetails,
-		})
+		}
+		if sizer != nil && !obj.IsDir() && isCASFileName(obj.GetName()) {
+			needsCAS = append(needsCAS, i)
+		}
 	}
+	if len(needsCAS) == 0 {
+		return resp
+	}
+	sem := make(chan struct{}, 8)
+	var wg sync.WaitGroup
+	for _, idx := range needsCAS {
+		obj := objs[idx]
+		wg.Add(1)
+		go func(i int, o model.Obj) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			size, name, err := sizer.CASSourceSize(ctx, o)
+			if err != nil {
+				return
+			}
+			resp[i].Size = size
+			resp[i].CASSource = true
+			resp[i].CASSourceName = name
+		}(idx, obj)
+	}
+	wg.Wait()
 	return resp
+}
+
+func isCASFileName(name string) bool {
+	return strings.HasSuffix(strings.ToLower(strings.TrimSpace(name)), ".cas")
 }
 
 type FsGetReq struct {
