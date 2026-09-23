@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"path"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/OpenListTeam/OpenList/v4/drivers/base"
@@ -36,6 +37,50 @@ func (d *Yun139) shouldDeleteSource() bool {
 
 func (d *Yun139) CASDownloadRestoreEnabled() bool {
 	return d.CASDownloadRestore
+}
+
+// casSizeCache 缓存 .cas 文件 ID -> 原始信息，避免同一会话内重复下载同样的 .cas。
+var casSizeCache = struct {
+	sync.RWMutex
+	m map[string]*casmeta.Info
+}{m: make(map[string]*casmeta.Info)}
+
+const casSizeCacheLimit = 20000
+
+func casSizeCacheGet(id string) (*casmeta.Info, bool) {
+	casSizeCache.RLock()
+	info, ok := casSizeCache.m[id]
+	casSizeCache.RUnlock()
+	return info, ok
+}
+
+func casSizeCachePut(id string, info *casmeta.Info) {
+	casSizeCache.Lock()
+	if len(casSizeCache.m) >= casSizeCacheLimit {
+		casSizeCache.m = make(map[string]*casmeta.Info)
+	}
+	casSizeCache.m[id] = info
+	casSizeCache.Unlock()
+}
+
+// CASSourceSize 返回 .cas 文件对应的原始文件大小与原始文件名。
+// 非 .cas 文件直接返回文件自身大小与名称。
+func (d *Yun139) CASSourceSize(ctx context.Context, file model.Obj) (int64, string, error) {
+	if file == nil {
+		return 0, "", fmt.Errorf("nil file")
+	}
+	if !isCASName(file.GetName()) {
+		return file.GetSize(), file.GetName(), nil
+	}
+	if info, ok := casSizeCacheGet(file.GetID()); ok && info != nil {
+		return info.Size, info.Name, nil
+	}
+	info, err := d.parseCASFromObj(ctx, file)
+	if err != nil {
+		return file.GetSize(), file.GetName(), err
+	}
+	casSizeCachePut(file.GetID(), info)
+	return info.Size, info.Name, nil
 }
 
 func (d *Yun139) shouldPlayCAS(file model.Obj, args model.LinkArgs) bool {
