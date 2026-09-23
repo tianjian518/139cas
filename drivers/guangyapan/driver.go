@@ -3,19 +3,28 @@ package guangyapan
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"time"
 
 	"github.com/OpenListTeam/OpenList/v4/drivers/base"
 	"github.com/OpenListTeam/OpenList/v4/internal/driver"
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
+	"github.com/OpenListTeam/OpenList/v4/internal/op"
 	"github.com/go-resty/resty/v2"
+	log "github.com/sirupsen/logrus"
 )
 
 type GuangYaPan struct {
 	model.Storage
 	Addition
-	client *resty.Client
+	client        *resty.Client
+	accountClient *resty.Client
+}
+
+// persistAddition 把 Addition 变更落库。测试环境下无数据库，可在用例里替换为空实现。
+var persistAddition = func(d *GuangYaPan) {
+	op.MustSaveDriverStorage(d)
 }
 
 func (d *GuangYaPan) Config() driver.Config {
@@ -28,11 +37,44 @@ func (d *GuangYaPan) GetAddition() driver.Additional {
 
 func (d *GuangYaPan) Init(ctx context.Context) error {
 	d.initClient()
-	if d.AccessToken == "" && d.RefreshToken != "" {
-		return d.refreshAccessToken(ctx)
+
+	// 登录优先级：access_token → refresh_token → 短信验证码。
+	if d.AccessToken != "" {
+		if err := d.validateToken(ctx); err == nil {
+			return nil
+		}
+		d.AccessToken = ""
 	}
+	if d.RefreshToken != "" {
+		if err := d.refreshAccessToken(ctx); err == nil {
+			if err := d.validateToken(ctx); err == nil {
+				return nil
+			}
+		}
+	}
+
+	// 两段式短信登录：
+	// 1) 只填手机号 + send_code=true：发送验证码并缓存 verification_id（不中断初始化）
+	// 2) 手机号 + verify_code：完成登录并保存令牌
+	if d.PhoneNumber != "" {
+		if d.canSMSLogin() {
+			if err := d.loginBySMSCode(ctx); err != nil {
+				return err
+			}
+			return d.validateToken(ctx)
+		}
+		if d.SendCode {
+			if err := d.prepareSMSCode(ctx); err != nil {
+				log.Warnf("guangyapan: 发送短信验证码失败: %v", err)
+				return fmt.Errorf("发送短信验证码失败：%v（可在保存后重试，或手动填写 access_token）", err)
+			}
+			log.Info("guangyapan: 短信验证码已发送，请填写 verify_code 后保存以完成登录")
+		}
+		return nil
+	}
+
 	if d.AccessToken == "" {
-		return errors.New("access_token is empty")
+		return errors.New("光鸭云盘未登录：请填写 access_token、refresh_token，或使用手机号+验证码短信登录")
 	}
 	return nil
 }

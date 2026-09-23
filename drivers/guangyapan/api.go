@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/OpenListTeam/OpenList/v4/drivers/base"
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
 	"github.com/go-resty/resty/v2"
@@ -23,11 +22,15 @@ var (
 )
 
 func (d *GuangYaPan) initClient() {
-	if d.client == nil {
-		d.client = base.NewRestyClient()
-	}
 	if d.ClientID == "" {
 		d.ClientID = defaultClientID
+	}
+	if d.DeviceID = normalizeDeviceID(d.DeviceID); d.DeviceID == "" {
+		d.DeviceID = randomDeviceID()
+	}
+	deviceSign := strings.TrimSpace(d.DeviceSign)
+	if deviceSign == "" {
+		deviceSign = "wdi10." + d.DeviceID
 	}
 	if d.PageSize <= 0 {
 		d.PageSize = 100
@@ -38,10 +41,29 @@ func (d *GuangYaPan) initClient() {
 	if d.SortType == 0 {
 		d.SortType = 1
 	}
-	d.client.SetHeaders(commonHeaders(d.ClientID, d.DeviceID))
+
+	d.client = newHTTPClient()
+	d.client.SetHeaders(commonHeaders(d.ClientID, d.DeviceID, deviceSign))
+
+	// 账号域独立一个 client（登录 / 刷新令牌 / 校验令牌用），与文件 API 域分开。
+	d.accountClient = newHTTPClient()
+	d.accountClient.SetHeaders(accountHeaders(d.ClientID, d.DeviceID, deviceSign))
+	if accountBaseURL != "" {
+		d.accountClient.SetBaseURL(accountBaseURL)
+	}
+	if apiBaseURL != "" {
+		d.client.SetBaseURL(apiBaseURL)
+	}
 }
 
-func commonHeaders(clientID, deviceID string) map[string]string {
+// newHTTPClient 构造 HTTP 客户端。
+// 说明：函数体刻意只调用 resty.New()，不使用 base.NewRestyClient()——后者会读取全局
+// conf.Conf，在配置未初始化时（例如单元测试）会 panic。
+func newHTTPClient() *resty.Client {
+	return resty.New()
+}
+
+func commonHeaders(clientID, deviceID, deviceSign string) map[string]string {
 	return map[string]string{
 		"Accept":             "application/json, text/plain, */*",
 		"Content-Type":       "application/json",
@@ -53,13 +75,33 @@ func commonHeaders(clientID, deviceID string) map[string]string {
 		"X-Device-Id":        deviceID,
 		"X-Device-Model":     "chrome%2F147.0.0.0",
 		"X-Device-Name":      "PC-Chrome",
-		"X-Device-Sign":      "wdi10." + deviceID + "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+		"X-Device-Sign":      deviceSign,
 		"X-Net-Work-Type":    "NONE",
 		"X-Os-Version":       "Win32",
 		"X-Platform-Version": "1",
 		"X-Protocol-Version": "301",
 		"X-Provider-Name":    "NONE",
 		"X-Sdk-Version":      "9.0.2",
+	}
+}
+
+// accountHeaders 是账号域（account.guangyapan.com）所需请求头。
+func accountHeaders(clientID, deviceID, deviceSign string) map[string]string {
+	return map[string]string{
+		"Accept":             "application/json, text/plain, */*",
+		"Content-Type":       "application/json",
+		"X-Device-Model":     "chrome%2F147.0.0.0",
+		"X-Device-Name":      "PC-Chrome",
+		"X-Device-Sign":      deviceSign,
+		"X-Net-Work-Type":    "NONE",
+		"X-OS-Version":       "MacIntel",
+		"X-Platform-Version": "1",
+		"X-Protocol-Version": "301",
+		"X-Provider-Name":    "NONE",
+		"X-SDK-Version":      "9.0.2",
+		"X-Client-Id":        clientID,
+		"X-Client-Version":   "0.0.1",
+		"X-Device-Id":        deviceID,
 	}
 }
 
@@ -114,7 +156,10 @@ func (d *GuangYaPan) authHeaders() map[string]string {
 }
 
 func (d *GuangYaPan) refreshAccessToken(ctx context.Context) error {
-	if d.RefreshToken == "" {
+	if d.accountClient == nil {
+		d.initClient()
+	}
+	if strings.TrimSpace(d.RefreshToken) == "" {
 		return errors.New("refresh_token is empty")
 	}
 	var resp tokenResp
@@ -127,14 +172,23 @@ func (d *GuangYaPan) refreshAccessToken(ctx context.Context) error {
 		return err
 	}
 	if resp.AccessToken == "" {
-		return fmt.Errorf("refresh token failed: %s%s", resp.Error, resp.Msg)
+		return fmt.Errorf("refresh token failed: %s", d.accountErr(resp.ErrorDesc, resp.Error, resp.Msg))
 	}
 	d.AccessToken = resp.AccessToken
 	if resp.RefreshToken != "" {
 		d.RefreshToken = resp.RefreshToken
 	}
-	d.client.SetHeaders(commonHeaders(d.ClientID, d.DeviceID))
+	// 刷新成功后把新令牌落库，避免重启后又要重新登录。
+	persistAddition(d)
+	d.client.SetHeaders(commonHeaders(d.ClientID, d.DeviceID, d.deviceSignOrDefault()))
 	return nil
+}
+
+func (d *GuangYaPan) deviceSignOrDefault() string {
+	if sign := strings.TrimSpace(d.DeviceSign); sign != "" {
+		return sign
+	}
+	return "wdi10." + d.DeviceID
 }
 
 func (d *GuangYaPan) listAll(ctx context.Context, parentID string) ([]model.Obj, error) {
@@ -489,12 +543,4 @@ func unixTime(value float64) time.Time {
 		value = value / 1000
 	}
 	return time.Unix(int64(value), 0)
-}
-
-type tokenResp struct {
-	AccessToken      string `json:"access_token"`
-	RefreshToken     string `json:"refresh_token"`
-	Error            string `json:"error"`
-	ErrorDescription string `json:"error_description"`
-	Msg              string `json:"msg"`
 }

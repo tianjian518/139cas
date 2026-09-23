@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,7 +18,11 @@ import (
 )
 
 func TestListConvertsGuangYaItems(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := testServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/user/me" {
+			writeJSON(t, w, map[string]any{"sub": "user-1"})
+			return
+		}
 		if r.URL.Path != "/nd.bizuserres.s/v1/file/get_file_list" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
@@ -47,7 +53,7 @@ func TestListConvertsGuangYaItems(t *testing.T) {
 				},
 			},
 		})
-	}))
+	})
 	defer server.Close()
 
 	oldAccountBaseURL, oldAPIBaseURL := accountBaseURL, apiBaseURL
@@ -61,7 +67,7 @@ func TestListConvertsGuangYaItems(t *testing.T) {
 			AccessToken:  "access-token",
 			RefreshToken: "refresh-token",
 			ClientID:     defaultClientID,
-			DeviceID:     "device-id",
+			DeviceID:     testDeviceID,
 			PageSize:     100,
 			OrderBy:      3,
 			SortType:     1,
@@ -122,8 +128,10 @@ func TestRawFileToObjRecognizesAlternateDirectoryTypeFields(t *testing.T) {
 
 func TestLinkFallsBackToVodDownloadURL(t *testing.T) {
 	var vodCalled bool
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := testServer(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case "/v1/user/me":
+			writeJSON(t, w, map[string]any{"sub": "user-1"})
 		case "/nd.bizuserres.s/v1/get_res_download_url":
 			writeJSON(t, w, map[string]any{"code": 143, "msg": "use vod"})
 		case "/nd.bizuserres.s/v1/file/get_vod_download_url":
@@ -142,7 +150,7 @@ func TestLinkFallsBackToVodDownloadURL(t *testing.T) {
 		default:
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
-	}))
+	})
 	defer server.Close()
 
 	oldAccountBaseURL, oldAPIBaseURL := accountBaseURL, apiBaseURL
@@ -182,7 +190,11 @@ func TestLinkFallsBackToVodDownloadURL(t *testing.T) {
 
 func TestRemoveCallsDeleteFileEndpoint(t *testing.T) {
 	var deleteCalled bool
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := testServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/user/me" {
+			writeJSON(t, w, map[string]any{"sub": "user-1"})
+			return
+		}
 		if r.URL.Path != "/nd.bizuserres.s/v1/file/delete_file" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
@@ -198,7 +210,7 @@ func TestRemoveCallsDeleteFileEndpoint(t *testing.T) {
 		}
 		deleteCalled = true
 		writeJSON(t, w, map[string]any{"code": 0, "msg": "success"})
-	}))
+	})
 	defer server.Close()
 
 	oldAccountBaseURL, oldAPIBaseURL := accountBaseURL, apiBaseURL
@@ -234,7 +246,7 @@ func TestRemoveCallsDeleteFileEndpoint(t *testing.T) {
 }
 
 func TestMoveCallsMoveFileEndpoint(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := testServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/nd.bizuserres.s/v1/file/move_file" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
@@ -247,7 +259,7 @@ func TestMoveCallsMoveFileEndpoint(t *testing.T) {
 			t.Fatalf("parentId = %#v", body["parentId"])
 		}
 		writeJSON(t, w, map[string]any{"code": 0, "msg": "success"})
-	}))
+	})
 	defer server.Close()
 	withTestBaseURLs(t, server.URL)
 
@@ -262,7 +274,7 @@ func TestMoveCallsMoveFileEndpoint(t *testing.T) {
 }
 
 func TestCopyCallsCopyFileEndpoint(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := testServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/nd.bizuserres.s/v1/file/copy_file" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
@@ -275,7 +287,7 @@ func TestCopyCallsCopyFileEndpoint(t *testing.T) {
 			t.Fatalf("parentId = %#v", body["parentId"])
 		}
 		writeJSON(t, w, map[string]any{"code": 0, "msg": "success"})
-	}))
+	})
 	defer server.Close()
 	withTestBaseURLs(t, server.URL)
 
@@ -290,7 +302,7 @@ func TestCopyCallsCopyFileEndpoint(t *testing.T) {
 }
 
 func TestRenameCallsRenameEndpoint(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := testServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/nd.bizuserres.s/v1/file/rename" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
@@ -302,7 +314,7 @@ func TestRenameCallsRenameEndpoint(t *testing.T) {
 			t.Fatalf("rename request body = %#v", body)
 		}
 		writeJSON(t, w, map[string]any{"code": 0, "msg": "success"})
-	}))
+	})
 	defer server.Close()
 	withTestBaseURLs(t, server.URL)
 
@@ -317,7 +329,7 @@ func TestRenameCallsRenameEndpoint(t *testing.T) {
 }
 
 func TestMakeDirCallsCreateDirEndpoint(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := testServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/nd.bizuserres.s/v1/file/create_dir" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
@@ -329,7 +341,7 @@ func TestMakeDirCallsCreateDirEndpoint(t *testing.T) {
 			t.Fatalf("create dir request body = %#v", body)
 		}
 		writeJSON(t, w, map[string]any{"code": 0, "msg": "success"})
-	}))
+	})
 	defer server.Close()
 	withTestBaseURLs(t, server.URL)
 
@@ -350,10 +362,133 @@ func TestConfigAllowsUpload(t *testing.T) {
 	}
 }
 
+// TestConfigExposesSMSLoginFields 保单里确实暴露了官方的短信登录字段。
+func TestConfigExposesSMSLoginFields(t *testing.T) {
+	additionType := reflect.TypeOf(Addition{})
+	for _, field := range []string{
+		"phone_number", "verify_code", "send_code",
+		"captcha_token", "verification_id",
+		"access_token", "refresh_token",
+	} {
+		found := false
+		for i := 0; i < additionType.NumField(); i++ {
+			tag := additionType.Field(i).Tag.Get("json")
+			if strings.Split(tag, ",")[0] == field {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("Addition 缺少字段 %q（官方驱动的短信登录字段）", field)
+		}
+	}
+}
+
+// TestPhoneNumberNormalization 校验手机号归一化逻辑。
+func TestPhoneNumberNormalization(t *testing.T) {
+	cases := map[string]string{
+		"13800000000":     "+86 13800000000",
+		"+8613800000000":  "+86 13800000000",
+		"+86 13800000000": "+86 13800000000",
+		"138 0000 0000":   "+86 13800000000",
+	}
+	for in, want := range cases {
+		if got := normalizePhoneE164(in); got != want {
+			t.Fatalf("normalizePhoneE164(%q) = %q, want %q", in, got, want)
+		}
+	}
+	if got := normalizeCaptchaUsername("+8613800000000"); got != "13800000000" {
+		t.Fatalf("normalizeCaptchaUsername = %q", got)
+	}
+}
+
+// TestSMSLoginTwoStage 模拟官方两段式短信登录：
+// 第一段 send_code 拿 verification_id，第二段 verify_code 换令牌。
+func TestSMSLoginTwoStage(t *testing.T) {
+	// 测试环境没有数据库，替换掉落库逻辑。
+	oldPersist := persistAddition
+	persistAddition = func(*GuangYaPan) {}
+	t.Cleanup(func() { persistAddition = oldPersist })
+
+	var captchaInitCalled, verificationCalled, verifyCalled, signinCalled bool
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/shield/captcha/init":
+			captchaInitCalled = true
+			writeJSON(t, w, map[string]any{"captcha_token": "captcha-token-1"})
+		case "/v1/auth/verification":
+			verificationCalled = true
+			if got := r.Header.Get("X-Captcha-Token"); got != "captcha-token-1" {
+				t.Fatalf("X-Captcha-Token = %q", got)
+			}
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode verification body: %v", err)
+			}
+			if body["phone_number"] != "+86 13800000000" {
+				t.Fatalf("phone_number = %#v", body["phone_number"])
+			}
+			writeJSON(t, w, map[string]any{"verification_id": "vid-1"})
+		case "/v1/auth/verification/verify":
+			verifyCalled = true
+			writeJSON(t, w, map[string]any{"verification_token": "vtoken-1"})
+		case "/v1/auth/signin":
+			signinCalled = true
+			writeJSON(t, w, map[string]any{
+				"access_token":  "at-1",
+				"refresh_token": "rt-1",
+			})
+		case "/v1/user/me":
+			writeJSON(t, w, map[string]any{"sub": "user-1"})
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	withTestBaseURLs(t, server.URL)
+
+	// 第一段：只填手机号 + 勾选发码
+	d := &GuangYaPan{Addition: Addition{
+		ClientID:    defaultClientID,
+		DeviceID:    testDeviceID,
+		PhoneNumber: "13800000000",
+		SendCode:    true,
+	}}
+	if err := d.Init(context.Background()); err != nil {
+		t.Fatalf("第一段 Init() error = %v", err)
+	}
+	if !captchaInitCalled || !verificationCalled {
+		t.Fatalf("第一段未走完整流程: captchaInit=%v verification=%v", captchaInitCalled, verificationCalled)
+	}
+	if d.VerificationID != "vid-1" {
+		t.Fatalf("VerificationID = %q", d.VerificationID)
+	}
+	if d.SendCode {
+		t.Fatal("SendCode 发送后应自动重置为 false")
+	}
+
+	// 第二段：填验证码完成登录
+	d.VerifyCode = "123456"
+	if err := d.Init(context.Background()); err != nil {
+		t.Fatalf("第二段 Init() error = %v", err)
+	}
+	if !verifyCalled || !signinCalled {
+		t.Fatalf("第二段未走完整流程: verify=%v signin=%v", verifyCalled, signinCalled)
+	}
+	if d.AccessToken != "at-1" || d.RefreshToken != "rt-1" {
+		t.Fatalf("令牌未写入: at=%q rt=%q", d.AccessToken, d.RefreshToken)
+	}
+	if d.VerifyCode != "" {
+		t.Fatal("登录成功后一次性验证码应被清空")
+	}
+}
+
 func TestPutUploadsViaTokenAndOSS(t *testing.T) {
 	content := []byte("hello")
 	var checkedFlash, requestedToken bool
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := testServer(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/nd.bizuserres.s/v1/check_can_flash_upload":
 			var body map[string]any
@@ -400,7 +535,7 @@ func TestPutUploadsViaTokenAndOSS(t *testing.T) {
 		default:
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
-	}))
+	})
 	defer server.Close()
 	withTestBaseURLs(t, server.URL)
 
@@ -468,6 +603,8 @@ func TestEndpointForOSSClientStripsBucketHost(t *testing.T) {
 	}
 }
 
+const testDeviceID = "0123456789abcdef0123456789abcdef"
+
 func newTestDriver(t *testing.T) *GuangYaPan {
 	t.Helper()
 	driver := &GuangYaPan{
@@ -475,7 +612,7 @@ func newTestDriver(t *testing.T) *GuangYaPan {
 			AccessToken:  "access-token",
 			RefreshToken: "refresh-token",
 			ClientID:     defaultClientID,
-			DeviceID:     "device-id",
+			DeviceID:     testDeviceID,
 		},
 		client: resty.New(),
 	}
@@ -516,4 +653,23 @@ func writeJSON(t *testing.T, w http.ResponseWriter, value any) {
 	if err := json.NewEncoder(w).Encode(value); err != nil {
 		t.Fatalf("encode response: %v", err)
 	}
+}
+
+// testServer 包一层 httptest.Server，自动应答账号域登录态校验
+// （Init 现在会先校验 access_token，测试里无需每个用例单独处理）。
+func testServer(t *testing.T, handler http.HandlerFunc) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/user/me":
+			writeJSON(t, w, map[string]any{"sub": "user-1"})
+		case "/v1/auth/token":
+			writeJSON(t, w, map[string]any{
+				"access_token":  "access-token",
+				"refresh_token": "refresh-token",
+			})
+		default:
+			handler(w, r)
+		}
+	}))
 }
