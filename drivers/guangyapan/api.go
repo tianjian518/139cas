@@ -2,19 +2,64 @@ package guangyapan
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
 	"github.com/go-resty/resty/v2"
+	log "github.com/sirupsen/logrus"
 )
 
 const defaultClientID = "aMe-8VSlkrbQXpUR"
+
+// tokenRefreshAhead 是 access_token 到期前提前主动续期的时间窗，
+// 避免令牌过期瞬间所有并发请求同时收到 401 而一起触发刷新。
+const tokenRefreshAhead = 5 * time.Minute
+
+// errTokenInvalid 表示 refresh_token 已被服务端作废（一次性轮换后被并发使用）。
+var errTokenInvalid = errors.New("光鸭 refresh_token 已失效（令牌一次性轮换，可能被并发刷新作废），请重新用手机号+短信验证码登录")
+
+// refreshKeyLocks 按 refresh_token 前缀做进程级串行。
+// OpenList 在编辑/重载存储时会短暂同时存在新旧两个 driver 实例，
+// 实例锁挡不住这种情况，故再按令牌加一道进程级锁。
+var refreshKeyLocks sync.Map
+
+func refreshKeyLock(refreshToken string) *sync.Mutex {
+	key := strings.TrimSpace(refreshToken)
+	if len(key) > 24 {
+		key = key[:24]
+	}
+	mu, _ := refreshKeyLocks.LoadOrStore(key, &sync.Mutex{})
+	return mu.(*sync.Mutex)
+}
+
+// jwtExpiry 解析 access_token 里的 exp（不校验签名，仅用于判断何时该续期）。
+func jwtExpiry(token string) time.Time {
+	parts := strings.Split(token, ".")
+	if len(parts) < 2 {
+		return time.Time{}
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return time.Time{}
+	}
+	var claim struct {
+		Exp int64 `json:"exp"`
+	}
+	if err := json.Unmarshal(payload, &claim); err != nil || claim.Exp <= 0 {
+		return time.Time{}
+	}
+	return time.Unix(claim.Exp, 0)
+}
 
 var (
 	accountBaseURL = "https://account.guangyapan.com"
@@ -106,6 +151,12 @@ func accountHeaders(clientID, deviceID, deviceSign string) map[string]string {
 }
 
 func (d *GuangYaPan) request(ctx context.Context, method, url string, body any, result any, retryOnUnauthorized bool) error {
+	// 主动续期：令牌快到期就先刷新，避免过期瞬间一堆并发请求同时 401。
+	if d.tokenNearExpiry() && strings.TrimSpace(d.RefreshToken) != "" {
+		if err := d.refreshAccessTokenAfter(ctx, atomic.LoadUint64(&d.tokenVersion)); err != nil {
+			log.Warnf("guangyapan: 主动续期失败: %v", err)
+		}
+	}
 	req := d.client.R().
 		SetContext(ctx).
 		SetHeaders(d.authHeaders())
@@ -130,7 +181,9 @@ func (d *GuangYaPan) request(ctx context.Context, method, url string, body any, 
 		return err
 	}
 	if resp.StatusCode() == http.StatusUnauthorized && retryOnUnauthorized && d.RefreshToken != "" {
-		if err := d.refreshAccessToken(ctx); err != nil {
+		// 记下当前令牌版本，锁内若发现已被别的协程刷新则直接复用新令牌，避免重复刷新把令牌轮换作废。
+		gen := atomic.LoadUint64(&d.tokenVersion)
+		if err := d.refreshAccessTokenAfter(ctx, gen); err != nil {
 			return err
 		}
 		return d.request(ctx, method, url, body, result, false)
@@ -155,33 +208,94 @@ func (d *GuangYaPan) authHeaders() map[string]string {
 	return headers
 }
 
+// refreshAccessToken 刷新令牌（带并发保护）。
 func (d *GuangYaPan) refreshAccessToken(ctx context.Context) error {
+	return d.refreshAccessTokenAfter(ctx, atomic.LoadUint64(&d.tokenVersion))
+}
+
+// refreshAccessTokenAfter 只在令牌版本仍是 gen 时才真正刷新；
+// 若期间已被其它协程刷新成功，则直接复用新令牌，绝不重复刷新。
+func (d *GuangYaPan) refreshAccessTokenAfter(ctx context.Context, gen uint64) error {
 	if d.accountClient == nil {
 		d.initClient()
 	}
 	if strings.TrimSpace(d.RefreshToken) == "" {
 		return errors.New("refresh_token is empty")
 	}
+
+	// 进程级串行：同一 refresh_token 同一时刻只允许一个刷新请求。
+	keyMu := refreshKeyLock(d.RefreshToken)
+	keyMu.Lock()
+	defer keyMu.Unlock()
+
+	d.refreshMu.Lock()
+	defer d.refreshMu.Unlock()
+
+	if d.tokenDead {
+		return errTokenInvalid
+	}
+	// 双检：等待锁期间已被其它协程刷新过，直接复用。
+	if d.tokenVersion != gen {
+		return nil
+	}
+
 	var resp tokenResp
-	err := d.request(ctx, http.MethodPost, accountBaseURL+"/v1/auth/token", map[string]any{
-		"grant_type":    "refresh_token",
-		"refresh_token": d.RefreshToken,
-		"client_id":     d.ClientID,
-	}, &resp, false)
+	httpResp, err := d.accountRequest().
+		SetContext(ctx).
+		SetBody(map[string]any{
+			"grant_type":    "refresh_token",
+			"refresh_token": strings.TrimSpace(d.RefreshToken),
+			"client_id":     d.ClientID,
+		}).
+		SetResult(&resp).
+		Post("/v1/auth/token")
 	if err != nil {
 		return err
 	}
-	if resp.AccessToken == "" {
-		return fmt.Errorf("refresh token failed: %s", d.accountErr(resp.ErrorDesc, resp.Error, resp.Msg))
+	if httpResp.IsError() || strings.TrimSpace(resp.AccessToken) == "" {
+		// 4126 / invalid_grant：refresh_token 一次性轮换已被作废，只能重新短信登录。
+		body := httpResp.String()
+		if resp.Error == "invalid_grant" || resp.ErrorCode == 4126 ||
+			strings.Contains(body, "invalid refresh token") || strings.Contains(body, "invalidate refresh token") {
+			d.tokenDead = true
+			log.Errorf("guangyapan: refresh_token 已失效: %s", d.accountErr(resp.ErrorDesc, resp.Error, body))
+			return errTokenInvalid
+		}
+		return fmt.Errorf("refresh token failed: %s", d.accountErr(resp.ErrorDesc, resp.Error, body))
 	}
-	d.AccessToken = resp.AccessToken
-	if resp.RefreshToken != "" {
-		d.RefreshToken = resp.RefreshToken
+
+	d.AccessToken = strings.TrimSpace(resp.AccessToken)
+	if strings.TrimSpace(resp.RefreshToken) != "" {
+		d.RefreshToken = strings.TrimSpace(resp.RefreshToken)
 	}
-	// 刷新成功后把新令牌落库，避免重启后又要重新登录。
+	d.tokenVersion++
+	d.tokenDead = false
+	d.tokenExpiry = tokenExpiryFrom(resp.AccessToken, resp.ExpiresIn)
+	// 刷新成功后立刻把新令牌落库，避免重启后又要用已作废的旧值。
 	persistAddition(d)
 	d.client.SetHeaders(commonHeaders(d.ClientID, d.DeviceID, d.deviceSignOrDefault()))
 	return nil
+}
+
+// tokenExpiryFrom 由 JWT exp 或 expires_in 推算过期时间。
+func tokenExpiryFrom(accessToken string, expiresIn int64) time.Time {
+	if exp := jwtExpiry(accessToken); !exp.IsZero() {
+		return exp
+	}
+	if expiresIn > 0 {
+		return time.Now().Add(time.Duration(expiresIn) * time.Second)
+	}
+	return time.Time{}
+}
+
+// tokenNearExpiry 判断 access_token 是否即将过期（未解析到过期时间则不主动续期）。
+func (d *GuangYaPan) tokenNearExpiry() bool {
+	d.refreshMu.Lock()
+	defer d.refreshMu.Unlock()
+	if d.tokenExpiry.IsZero() {
+		return false
+	}
+	return time.Now().Add(tokenRefreshAhead).After(d.tokenExpiry)
 }
 
 func (d *GuangYaPan) deviceSignOrDefault() string {

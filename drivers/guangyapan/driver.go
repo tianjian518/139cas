@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/OpenListTeam/OpenList/v4/drivers/base"
@@ -20,6 +21,16 @@ type GuangYaPan struct {
 	Addition
 	client        *resty.Client
 	accountClient *resty.Client
+
+	// refreshMu 保护令牌读写。光鸭的 refresh_token 是一次性轮换的：
+	// 用过一次服务端就作废旧值，并发刷新会互相互相作废，最终 4126 永久失效。
+	refreshMu sync.Mutex
+	// tokenVersion 每次刷新成功自增，用于双检：等待锁期间若已被其它协程刷新则不再重复刷新。
+	tokenVersion uint64
+	// tokenExpiry 是 access_token 的过期时间（由 JWT exp 或 expires_in 推算）。
+	tokenExpiry time.Time
+	// tokenDead 表示 refresh_token 已被服务端作废，只能重新短信登录。
+	tokenDead bool
 }
 
 // persistAddition 把 Addition 变更落库。测试环境下无数据库，可在用例里替换为空实现。
@@ -37,6 +48,9 @@ func (d *GuangYaPan) GetAddition() driver.Additional {
 
 func (d *GuangYaPan) Init(ctx context.Context) error {
 	d.initClient()
+	// 每次初始化都重新认定令牌可用，由刷新结果决定是否作废。
+	d.tokenDead = false
+	d.tokenExpiry = tokenExpiryFrom(d.AccessToken, 0)
 
 	// 登录优先级：access_token → refresh_token → 短信验证码。
 	if d.AccessToken != "" {

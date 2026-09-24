@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -482,6 +484,156 @@ func TestSMSLoginTwoStage(t *testing.T) {
 	}
 	if d.VerifyCode != "" {
 		t.Fatal("登录成功后一次性验证码应被清空")
+	}
+}
+
+// TestConcurrentRefreshOnlyRequestsOnce 是本次令牌失效事故的回归测试。
+//
+// 事故背景：光鸭的 refresh_token 是一次性轮换的——用一次服务端就作废旧值。
+// 旧实现没有并发保护，多个请求同时 401 时会各自拿同一个旧 refresh_token 去换，
+// 第一个成功、其余全部 4126，导致令牌被永久作废，只能重新短信登录。
+//
+// 本测试用 20 个协程并发触发刷新，断言服务端只收到 1 次 /v1/auth/token 请求。
+func TestConcurrentRefreshOnlyRequestsOnce(t *testing.T) {
+	oldPersist := persistAddition
+	persistAddition = func(*GuangYaPan) {}
+	t.Cleanup(func() { persistAddition = oldPersist })
+
+	const goroutines = 20
+
+	var (
+		mu           sync.Mutex
+		refreshCalls int
+		// validToken 模拟服务端的"当前有效令牌"，每次刷新都会轮换。
+		validToken   = "access-1"
+		validRefresh = "refresh-1"
+	)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/auth/token":
+			mu.Lock()
+			refreshCalls++
+			// 真实服务端行为：旧 refresh_token 只能成功兑换一次。
+			body, _ := io.ReadAll(r.Body)
+			var req map[string]any
+			_ = json.Unmarshal(body, &req)
+			if req["refresh_token"] != validRefresh {
+				mu.Unlock()
+				w.WriteHeader(http.StatusBadRequest)
+				writeJSON(t, w, map[string]any{
+					"error":             "invalid_grant",
+					"error_code":        4126,
+					"error_description": "invalid refresh token for it may be has been refreshed by other process",
+				})
+				return
+			}
+			oldRefresh := validRefresh
+			validToken = "access-2"
+			validRefresh = "refresh-2"
+			mu.Unlock()
+			writeJSON(t, w, map[string]any{
+				"access_token":  validToken,
+				"refresh_token": validRefresh,
+				"_used":         oldRefresh,
+			})
+		case "/v1/user/me":
+			mu.Lock()
+			current := validToken
+			mu.Unlock()
+			if got := r.Header.Get("Authorization"); got != "Bearer "+current {
+				w.WriteHeader(http.StatusUnauthorized)
+				writeJSON(t, w, map[string]any{"error": "unauthorized"})
+				return
+			}
+			writeJSON(t, w, map[string]any{"sub": "user-1"})
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	withTestBaseURLs(t, server.URL)
+
+	d := &GuangYaPan{Addition: Addition{
+		AccessToken:  "access-1",
+		RefreshToken: "refresh-1",
+		ClientID:     defaultClientID,
+		DeviceID:     testDeviceID,
+	}}
+	d.initClient()
+
+	// 20 个协程同时刷新，模拟并发 401。
+	var wg sync.WaitGroup
+	errs := make([]error, goroutines)
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			errs[idx] = d.refreshAccessToken(context.Background())
+		}(i)
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("第 %d 个协程刷新失败: %v", i, err)
+		}
+	}
+
+	mu.Lock()
+	calls := refreshCalls
+	mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("服务端收到 %d 次刷新请求，期望 1 次（并发未串行化，令牌会被轮换作废）", calls)
+	}
+	if d.AccessToken != "access-2" || d.RefreshToken != "refresh-2" {
+		t.Fatalf("令牌未更新到最新值: at=%q rt=%q", d.AccessToken, d.RefreshToken)
+	}
+}
+
+// TestRefreshWithDeadTokenIsNotRetried 验证令牌已作废时立刻停止重试，
+// 不会拿废令牌反复撞服务端。
+func TestRefreshWithDeadTokenIsNotRetried(t *testing.T) {
+	oldPersist := persistAddition
+	persistAddition = func(*GuangYaPan) {}
+	t.Cleanup(func() { persistAddition = oldPersist })
+
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/auth/token" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		calls++
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(t, w, map[string]any{
+			"error":             "invalid_grant",
+			"error_code":        4126,
+			"error_description": "invalid refresh token for it may be has been refreshed by other process",
+		})
+	}))
+	defer server.Close()
+
+	withTestBaseURLs(t, server.URL)
+
+	d := &GuangYaPan{Addition: Addition{
+		RefreshToken: "dead-refresh",
+		ClientID:     defaultClientID,
+		DeviceID:     testDeviceID,
+	}}
+	d.initClient()
+
+	if err := d.refreshAccessToken(context.Background()); !errors.Is(err, errTokenInvalid) {
+		t.Fatalf("首次刷新应返回 errTokenInvalid，实际 = %v", err)
+	}
+	// 已被标记作废，后续调用应直接短路，不再打服务端。
+	for i := 0; i < 3; i++ {
+		if err := d.refreshAccessToken(context.Background()); !errors.Is(err, errTokenInvalid) {
+			t.Fatalf("第 %d 次重试应短路返回 errTokenInvalid，实际 = %v", i+1, err)
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("服务端收到 %d 次请求，期望 1 次（失效后不应继续重试）", calls)
 	}
 }
 

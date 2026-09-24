@@ -159,15 +159,20 @@ func (d *GuangYaPan) loginBySMSCode(ctx context.Context) error {
 	d.VerificationID = ""
 	// 短信验证码一次性，登录成功后立刻清空，避免复用。
 	d.VerifyCode = ""
+	d.tokenVersion++
+	d.tokenDead = false
+	d.tokenExpiry = tokenExpiryFrom(d.AccessToken, 0)
 	persistAddition(d)
 	return nil
 }
 
 // prepareSMSCode 第一段：请求发送短信验证码，并把 verification_id 落库。
 func (d *GuangYaPan) prepareSMSCode(ctx context.Context) error {
-	// 每次显式发送都重新取 verification_id。
+	// 每次显式发送都重新取，旧的 verification_id 一律作废。
 	d.VerificationID = ""
-	if err := d.ensureCaptchaToken(ctx, false); err != nil {
+	// 风控 token 时效很短（分钟级），且上一轮登录成功后已无复用价值。
+	// 库里的值大概率已过期，直接强制换新，避免拿着废 token 反复撞 4002。
+	if err := d.ensureCaptchaToken(ctx, true); err != nil {
 		return err
 	}
 	verificationID, err := d.requestVerificationID(ctx)
@@ -181,6 +186,12 @@ func (d *GuangYaPan) prepareSMSCode(ctx context.Context) error {
 }
 
 func (d *GuangYaPan) requestVerificationID(ctx context.Context) (string, error) {
+	return d.requestVerificationIDWithRetry(ctx, true)
+}
+
+// requestVerificationIDWithRetry 请求验证码；allowCaptchaRetry 为 true 时，
+// 若风控 token 失效（captcha_invalid / 4002 / expired 等）会强制换新 token 后重试一次。
+func (d *GuangYaPan) requestVerificationIDWithRetry(ctx context.Context, allowCaptchaRetry bool) (string, error) {
 	req := d.accountRequest().SetContext(ctx)
 	if d.CaptchaToken != "" {
 		req.SetHeader("X-Captcha-Token", d.CaptchaToken)
@@ -199,15 +210,30 @@ func (d *GuangYaPan) requestVerificationID(ctx context.Context) (string, error) 
 		return "", err
 	}
 	if resp.IsError() || step1.Error != "" || strings.TrimSpace(step1.VerificationID) == "" {
-		// captcha token 过期/失效时刷新一次再重试。
-		if strings.Contains(step1.Error, "captcha_invalid") || strings.Contains(step1.ErrorDesc, "captcha_token expired") {
-			if err := d.ensureCaptchaToken(ctx, true); err == nil {
-				return d.requestVerificationID(ctx)
+		errMsg := d.accountErr(step1.ErrorDesc, step1.Error, resp.String())
+		// 风控 token 失效时强制换新再重试一次。
+		// 放宽匹配：光鸭实际返回 "Code(4002) - captcha_token expired"，
+		// 只匹配固定的两个字符串会漏判，凡是验证码相关失败都重取一次。
+		if allowCaptchaRetry && isCaptchaFailure(step1.Error, step1.ErrorDesc, resp.String(), step1.ErrorCode) {
+			if err := d.ensureCaptchaToken(ctx, true); err != nil {
+				return "", fmt.Errorf("刷新风控 token 失败：%v", err)
 			}
+			return d.requestVerificationIDWithRetry(ctx, false)
 		}
-		return "", fmt.Errorf("request verification failed: %s", d.accountErr(step1.ErrorDesc, step1.Error, resp.String()))
+		return "", fmt.Errorf("request verification failed: %s", errMsg)
 	}
 	return strings.TrimSpace(step1.VerificationID), nil
+}
+
+// isCaptchaFailure 判断失败原因是否为风控 token 失效。
+func isCaptchaFailure(short, desc, body string, code int) bool {
+	combined := strings.ToLower(short + " " + desc + " " + body)
+	for _, key := range []string{"captcha_invalid", "captcha_token expired", "captcha token expired", "4002", "safety verification has failed"} {
+		if strings.Contains(combined, strings.ToLower(key)) {
+			return true
+		}
+	}
+	return code == 4002
 }
 
 func (d *GuangYaPan) ensureCaptchaToken(ctx context.Context, force bool) error {
