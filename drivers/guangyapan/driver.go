@@ -31,11 +31,24 @@ type GuangYaPan struct {
 	tokenExpiry time.Time
 	// tokenDead 表示 refresh_token 已被服务端作废，只能重新短信登录。
 	tokenDead bool
+
+	// stopRefresh 用于停止后台续期协程（Drop 时调用）。
+	stopRefresh chan struct{}
+	stopOnce    sync.Once
 }
 
-// persistAddition 把 Addition 变更落库。测试环境下无数据库，可在用例里替换为空实现。
+// persistAddition 把 Addition 变更落库。测试环境下无数据库，可替换为空实现。
 var persistAddition = func(d *GuangYaPan) {
 	op.MustSaveDriverStorage(d)
+}
+
+// saveTokens 统一走落库入口。
+// 后台续期协程会跑在测试用例外，若直接读包级变量会与其他用例的桩相互干扰，
+// 这里加一层空值保护。
+func (d *GuangYaPan) saveTokens() {
+	if fn := persistAddition; fn != nil {
+		fn(d)
+	}
 }
 
 func (d *GuangYaPan) Config() driver.Config {
@@ -55,6 +68,7 @@ func (d *GuangYaPan) Init(ctx context.Context) error {
 	// 登录优先级：access_token → refresh_token → 短信验证码。
 	if d.AccessToken != "" {
 		if err := d.validateToken(ctx); err == nil {
+			d.startRefreshLoop()
 			return nil
 		}
 		d.AccessToken = ""
@@ -62,6 +76,7 @@ func (d *GuangYaPan) Init(ctx context.Context) error {
 	if d.RefreshToken != "" {
 		if err := d.refreshAccessToken(ctx); err == nil {
 			if err := d.validateToken(ctx); err == nil {
+				d.startRefreshLoop()
 				return nil
 			}
 		}
@@ -75,7 +90,11 @@ func (d *GuangYaPan) Init(ctx context.Context) error {
 			if err := d.loginBySMSCode(ctx); err != nil {
 				return err
 			}
-			return d.validateToken(ctx)
+			if err := d.validateToken(ctx); err != nil {
+				return err
+			}
+			d.startRefreshLoop()
+			return nil
 		}
 		if d.SendCode {
 			if err := d.prepareSMSCode(ctx); err != nil {
@@ -94,6 +113,7 @@ func (d *GuangYaPan) Init(ctx context.Context) error {
 }
 
 func (d *GuangYaPan) Drop(ctx context.Context) error {
+	d.stopRefreshLoop()
 	return nil
 }
 

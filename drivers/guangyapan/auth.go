@@ -162,7 +162,7 @@ func (d *GuangYaPan) loginBySMSCode(ctx context.Context) error {
 	d.tokenVersion++
 	d.tokenDead = false
 	d.tokenExpiry = tokenExpiryFrom(d.AccessToken, 0)
-	persistAddition(d)
+	d.saveTokens()
 	return nil
 }
 
@@ -181,7 +181,7 @@ func (d *GuangYaPan) prepareSMSCode(ctx context.Context) error {
 	}
 	d.VerificationID = verificationID
 	d.SendCode = false
-	persistAddition(d)
+	d.saveTokens()
 	return nil
 }
 
@@ -266,7 +266,7 @@ func (d *GuangYaPan) ensureCaptchaToken(ctx context.Context, force bool) error {
 		return fmt.Errorf("init captcha token failed: %s", d.accountErr(out.ErrorDesc, out.Error, resp.String()))
 	}
 	d.CaptchaToken = strings.TrimSpace(out.CaptchaToken)
-	persistAddition(d)
+	d.saveTokens()
 	return nil
 }
 

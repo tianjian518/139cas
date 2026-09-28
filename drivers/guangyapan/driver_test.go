@@ -20,6 +20,7 @@ import (
 )
 
 func TestListConvertsGuangYaItems(t *testing.T) {
+	stubPersist(t)
 	server := testServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/user/me" {
 			writeJSON(t, w, map[string]any{"sub": "user-1"})
@@ -79,6 +80,7 @@ func TestListConvertsGuangYaItems(t *testing.T) {
 	if err := driver.Init(context.Background()); err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
+	t.Cleanup(func() { _ = driver.Drop(context.Background()) })
 
 	objs, err := driver.List(context.Background(), &model.Object{ID: "", Name: "root", IsFolder: true}, model.ListArgs{})
 	if err != nil {
@@ -129,6 +131,7 @@ func TestRawFileToObjRecognizesAlternateDirectoryTypeFields(t *testing.T) {
 }
 
 func TestLinkFallsBackToVodDownloadURL(t *testing.T) {
+	stubPersist(t)
 	var vodCalled bool
 	server := testServer(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -173,6 +176,7 @@ func TestLinkFallsBackToVodDownloadURL(t *testing.T) {
 	if err := driver.Init(context.Background()); err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
+	t.Cleanup(func() { _ = driver.Drop(context.Background()) })
 
 	link, err := driver.Link(context.Background(), &Object{Object: model.Object{
 		ID:       "file-1",
@@ -191,6 +195,7 @@ func TestLinkFallsBackToVodDownloadURL(t *testing.T) {
 }
 
 func TestRemoveCallsDeleteFileEndpoint(t *testing.T) {
+	stubPersist(t)
 	var deleteCalled bool
 	server := testServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/user/me" {
@@ -233,6 +238,7 @@ func TestRemoveCallsDeleteFileEndpoint(t *testing.T) {
 	if err := driver.Init(context.Background()); err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
+	t.Cleanup(func() { _ = driver.Drop(context.Background()) })
 
 	err := driver.Remove(context.Background(), &Object{Object: model.Object{
 		ID:       "file-1",
@@ -248,6 +254,7 @@ func TestRemoveCallsDeleteFileEndpoint(t *testing.T) {
 }
 
 func TestMoveCallsMoveFileEndpoint(t *testing.T) {
+	stubPersist(t)
 	server := testServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/nd.bizuserres.s/v1/file/move_file" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
@@ -276,6 +283,7 @@ func TestMoveCallsMoveFileEndpoint(t *testing.T) {
 }
 
 func TestCopyCallsCopyFileEndpoint(t *testing.T) {
+	stubPersist(t)
 	server := testServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/nd.bizuserres.s/v1/file/copy_file" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
@@ -304,6 +312,7 @@ func TestCopyCallsCopyFileEndpoint(t *testing.T) {
 }
 
 func TestRenameCallsRenameEndpoint(t *testing.T) {
+	stubPersist(t)
 	server := testServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/nd.bizuserres.s/v1/file/rename" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
@@ -331,6 +340,7 @@ func TestRenameCallsRenameEndpoint(t *testing.T) {
 }
 
 func TestMakeDirCallsCreateDirEndpoint(t *testing.T) {
+	stubPersist(t)
 	server := testServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/nd.bizuserres.s/v1/file/create_dir" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
@@ -408,9 +418,7 @@ func TestPhoneNumberNormalization(t *testing.T) {
 // 第一段 send_code 拿 verification_id，第二段 verify_code 换令牌。
 func TestSMSLoginTwoStage(t *testing.T) {
 	// 测试环境没有数据库，替换掉落库逻辑。
-	oldPersist := persistAddition
-	persistAddition = func(*GuangYaPan) {}
-	t.Cleanup(func() { persistAddition = oldPersist })
+	stubPersist(t)
 
 	var captchaInitCalled, verificationCalled, verifyCalled, signinCalled bool
 
@@ -495,9 +503,7 @@ func TestSMSLoginTwoStage(t *testing.T) {
 //
 // 本测试用 20 个协程并发触发刷新，断言服务端只收到 1 次 /v1/auth/token 请求。
 func TestConcurrentRefreshOnlyRequestsOnce(t *testing.T) {
-	oldPersist := persistAddition
-	persistAddition = func(*GuangYaPan) {}
-	t.Cleanup(func() { persistAddition = oldPersist })
+	stubPersist(t)
 
 	const goroutines = 20
 
@@ -592,12 +598,139 @@ func TestConcurrentRefreshOnlyRequestsOnce(t *testing.T) {
 	}
 }
 
+// TestBackgroundRefreshWithoutAnyRequest 是"令牌静默过期"事故的回归测试。
+//
+// 事故背景：续期最初只挂在 request() 里（惰性触发），如果 24 小时内没有任何
+// 请求访问该存储，续期就永远不会发生，access_token 到期后 refresh_token 也
+// 随之超时作废。线上的表现是：登录后第二天列表变空，日志里却一条记录都没有。
+//
+// 本测试断言：在【完全不发任何请求】的情况下，后台协程也会主动把即将过期的
+// 令牌续上。
+func TestBackgroundRefreshWithoutAnyRequest(t *testing.T) {
+	stubPersist(t)
+
+	var (
+		mu          sync.Mutex
+		refreshCall int
+	)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/auth/token" {
+			t.Fatalf("后台续期不应请求其它接口，收到: %s", r.URL.Path)
+		}
+		mu.Lock()
+		refreshCall++
+		mu.Unlock()
+		writeJSON(t, w, map[string]any{
+			"access_token":  "access-new",
+			"refresh_token": "refresh-new",
+			"expires_in":    7200,
+		})
+	}))
+	defer server.Close()
+
+	withTestBaseURLs(t, server.URL)
+
+	d := &GuangYaPan{Addition: Addition{
+		AccessToken:  "access-old",
+		RefreshToken: "refresh-old",
+		ClientID:     defaultClientID,
+		DeviceID:     testDeviceID,
+	}}
+	d.initClient()
+	// 人为把过期时间设成"马上要过期"，模拟距到期不足 tokenRefreshAhead 的情况。
+	d.tokenExpiry = time.Now().Add(time.Minute)
+
+	startTestRefreshLoop(t, d)
+
+	// 不发任何业务请求，只等后台协程首次触发。
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		n := refreshCall
+		mu.Unlock()
+		if n > 0 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	mu.Lock()
+	calls := refreshCall
+	mu.Unlock()
+	if calls == 0 {
+		t.Fatal("后台续期未触发：无请求访问时令牌会静默过期（这正是线上事故的原因）")
+	}
+	if d.AccessToken != "access-new" {
+		t.Fatalf("access_token 未更新: %q", d.AccessToken)
+	}
+	if d.RefreshToken != "refresh-new" {
+		t.Fatalf("refresh_token 未轮换: %q", d.RefreshToken)
+	}
+	if d.tokenExpiry.Before(time.Now().Add(time.Hour)) {
+		t.Fatalf("tokenExpiry 未按 expires_in 更新: %s", d.tokenExpiry)
+	}
+}
+
+// TestBackgroundRefreshSkipsWhenTokenFresh 验证令牌还早着过期时后台协程不做无用刷新
+// （每次刷新都会轮换 refresh_token，多余的刷新只是浪费）。
+func TestBackgroundRefreshSkipsWhenTokenFresh(t *testing.T) {
+	stubPersist(t)
+
+	var refreshCall int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		refreshCall++
+		writeJSON(t, w, map[string]any{"access_token": "x", "refresh_token": "y"})
+	}))
+	defer server.Close()
+
+	withTestBaseURLs(t, server.URL)
+
+	d := &GuangYaPan{Addition: Addition{
+		AccessToken:  "access-old",
+		RefreshToken: "refresh-old",
+		ClientID:     defaultClientID,
+		DeviceID:     testDeviceID,
+	}}
+	d.initClient()
+	// 过期时间还很远，不应触发续期。
+	d.tokenExpiry = time.Now().Add(10 * time.Hour)
+
+	d.refreshIfNeeded()
+
+	if refreshCall != 0 {
+		t.Fatalf("令牌未临近过期却发起了 %d 次刷新", refreshCall)
+	}
+}
+
+// TestBackgroundRefreshStopsOnDrop 验证 Drop 后后台协程会退出。
+func TestBackgroundRefreshStopsOnDrop(t *testing.T) {
+	stubPersist(t)
+
+	d := &GuangYaPan{Addition: Addition{
+		RefreshToken: "refresh-old",
+		ClientID:     defaultClientID,
+		DeviceID:     testDeviceID,
+	}}
+	d.initClient()
+	d.startRefreshLoop()
+	d.stopRefreshLoop()
+
+	// 可重复调用且不 panic。
+	d.stopRefreshLoop()
+
+	d.refreshMu.Lock()
+	stopped := d.stopRefresh == nil
+	d.refreshMu.Unlock()
+	if !stopped {
+		t.Fatal("Drop 后后台续期协程未停止")
+	}
+}
+
 // TestRefreshWithDeadTokenIsNotRetried 验证令牌已作废时立刻停止重试，
 // 不会拿废令牌反复撞服务端。
 func TestRefreshWithDeadTokenIsNotRetried(t *testing.T) {
-	oldPersist := persistAddition
-	persistAddition = func(*GuangYaPan) {}
-	t.Cleanup(func() { persistAddition = oldPersist })
+	stubPersist(t)
 
 	var calls int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -637,7 +770,38 @@ func TestRefreshWithDeadTokenIsNotRetried(t *testing.T) {
 	}
 }
 
+// stubPersist 替换落库桩，并在用例结束时恢复。
+// 必须在 t.Cleanup 中先停掉后台续期协程，否则协程会带着旧桩继续跑，
+// 干扰后续用例（曾导致 nil pointer panic）。
+func stubPersist(t *testing.T) {
+	t.Helper()
+	oldPersist := persistAddition
+	persistAddition = func(*GuangYaPan) {}
+	t.Cleanup(func() { persistAddition = oldPersist })
+}
+
+// startTestRefreshLoop 启动后台续期协程并登记"用例结束前必须停掉"。
+// 注册顺序很关键：stop 必须先于桩恢复执行（cleanup 后注册者先跑），
+// 否则协程会在桩恢复之后仍发起刷新，直接打到未初始化的数据库上。
+func startTestRefreshLoop(t *testing.T, d *GuangYaPan) {
+	t.Helper()
+	d.startRefreshLoop()
+	t.Cleanup(func() { d.stopRefreshLoop() })
+}
+
+// newBareDriver 构造一个不含后台续期协程的驱动实例（测试用）。
+// 后台续期请显式调用 startRefreshLoop，并在用例里 t.Cleanup(d.stopRefreshLoop)。
+func newBareDriver(t *testing.T, addition Addition) *GuangYaPan {
+	t.Helper()
+	stubPersist(t)
+	d := &GuangYaPan{Addition: addition}
+	d.initClient()
+	t.Cleanup(d.stopRefreshLoop)
+	return d
+}
+
 func TestPutUploadsViaTokenAndOSS(t *testing.T) {
+	stubPersist(t)
 	content := []byte("hello")
 	var checkedFlash, requestedToken bool
 	server := testServer(t, func(w http.ResponseWriter, r *http.Request) {
@@ -771,6 +935,7 @@ func newTestDriver(t *testing.T) *GuangYaPan {
 	if err := driver.Init(context.Background()); err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
+	t.Cleanup(func() { _ = driver.Drop(context.Background()) })
 	return driver
 }
 

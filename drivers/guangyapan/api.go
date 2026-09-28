@@ -272,7 +272,7 @@ func (d *GuangYaPan) refreshAccessTokenAfter(ctx context.Context, gen uint64) er
 	d.tokenDead = false
 	d.tokenExpiry = tokenExpiryFrom(resp.AccessToken, resp.ExpiresIn)
 	// 刷新成功后立刻把新令牌落库，避免重启后又要用已作废的旧值。
-	persistAddition(d)
+	d.saveTokens()
 	d.client.SetHeaders(commonHeaders(d.ClientID, d.DeviceID, d.deviceSignOrDefault()))
 	return nil
 }
@@ -296,6 +296,91 @@ func (d *GuangYaPan) tokenNearExpiry() bool {
 		return false
 	}
 	return time.Now().Add(tokenRefreshAhead).After(d.tokenExpiry)
+}
+
+// tokenExpiryState 返回当前过期时间与失效标记的快照（供后台协程判断用）。
+func (d *GuangYaPan) tokenExpiryState() (time.Time, bool) {
+	d.refreshMu.Lock()
+	defer d.refreshMu.Unlock()
+	return d.tokenExpiry, d.tokenDead
+}
+
+// refreshCheckInterval 是后台续期协程的检查间隔。
+const refreshCheckInterval = 10 * time.Minute
+
+// startRefreshLoop 启动后台定时续期。
+//
+// 必要性：仅靠 request() 里的惰性续期是不够的——如果 24 小时内没有任何请求
+// 访问该存储（例如深夜、或长期无人浏览），惰性续期永远不会触发，access_token
+// 到期后 refresh_token 也会随之超时作废，只能重新短信登录。
+// 后台协程保证无论有没有访问，令牌都会被提前续上。
+func (d *GuangYaPan) startRefreshLoop() {
+	if d.RefreshToken == "" {
+		return
+	}
+	d.refreshMu.Lock()
+	if d.stopRefresh != nil { // 已在运行，避免重复启动
+		d.refreshMu.Unlock()
+		return
+	}
+	stop := make(chan struct{})
+	d.stopRefresh = stop
+	d.stopOnce = sync.Once{}
+	d.refreshMu.Unlock()
+
+	go func() {
+		// 启动时先检查一次：存储可能是在令牌已临近过期（甚至刚过期）时加载的，
+		// 没必要干等一个检查周期。
+		d.refreshIfNeeded()
+
+		ticker := time.NewTicker(refreshCheckInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				d.refreshIfNeeded()
+			}
+		}
+	}()
+}
+
+// refreshIfNeeded 到期前主动续期；已作废或未登录则不再尝试。
+func (d *GuangYaPan) refreshIfNeeded() {
+	expiry, dead := d.tokenExpiryState()
+	if dead {
+		return
+	}
+	if d.RefreshToken == "" {
+		return
+	}
+	// 未解析出过期时间时也守一个兜底：距上次刷新超过 12 小时就主动换一次，
+	// 避免 refresh_token 因长期不用而超时。
+	if !expiry.IsZero() && !time.Now().Add(tokenRefreshAhead).After(expiry) {
+		return
+	}
+	if err := d.refreshAccessTokenAfter(context.Background(), atomic.LoadUint64(&d.tokenVersion)); err != nil {
+		if errors.Is(err, errTokenInvalid) {
+			log.Errorf("guangyapan: 后台续期失败，refresh_token 已失效，需要重新短信登录")
+		} else {
+			log.Warnf("guangyapan: 后台续期失败（将自动重试）: %v", err)
+		}
+		return
+	}
+	log.Infof("guangyapan: 后台续期成功，access_token 已更新（新过期时间 %s）",
+		d.tokenExpiry.Format("2006-01-02 15:04:05"))
+}
+
+// stopRefreshLoop 停止后台续期协程（Drop 时调用）。
+func (d *GuangYaPan) stopRefreshLoop() {
+	d.refreshMu.Lock()
+	stop := d.stopRefresh
+	d.stopRefresh = nil
+	d.refreshMu.Unlock()
+	if stop != nil {
+		d.stopOnce.Do(func() { close(stop) })
+	}
 }
 
 func (d *GuangYaPan) deviceSignOrDefault() string {
