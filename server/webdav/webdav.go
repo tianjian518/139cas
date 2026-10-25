@@ -259,10 +259,8 @@ func (h *Handler) handleGetHeadPost(w http.ResponseWriter, r *http.Request) (sta
 			return http.StatusInternalServerError, err
 		}
 		defer link.Close()
-		common.SetPreconnectHeader(w, link.URL, []string{"Referer"})
-		// The target URL is signed and changes on every request, so a cache must
-		// never replay one 302 Location for a later one.
-		w.Header().Set("Vary", "Origin, Range, Referer, User-Agent")
+		common.SetPreconnectHeader(w, link.URL)
+		common.CacheableClientRedirect(w)
 		http.Redirect(w, r, link.URL, http.StatusFound)
 		return 0, nil
 	}

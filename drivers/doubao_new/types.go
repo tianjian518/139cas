@@ -17,10 +17,12 @@ type ListData struct {
 	HasMore   bool     `json:"has_more"`
 	LastLabel string   `json:"last_label"`
 	NodeList  []string `json:"node_list"`
-	Entities  struct {
-		Nodes map[string]Node `json:"nodes"`
-		Users map[string]User `json:"users"`
-	} `json:"entities"`
+	Entities  Entities `json:"entities"`
+}
+
+type Entities struct {
+	Nodes map[string]Node `json:"nodes"`
+	Users map[string]User `json:"users"`
 }
 
 type Node struct {

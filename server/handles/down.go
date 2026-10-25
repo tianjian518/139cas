@@ -168,7 +168,6 @@ func redirect(c *gin.Context, link *model.Link) {
 	defer link.Close()
 	var err error
 	c.Header("Referrer-Policy", "no-referrer")
-	c.Header("Cache-Control", "max-age=0, no-cache, no-store, must-revalidate")
 	if setting.GetBool(conf.ForwardDirectLinkParams) {
 		query := c.Request.URL.Query()
 		for _, v := range conf.SlicesMap[conf.IgnoreDirectLinkParams] {
@@ -180,10 +179,8 @@ func redirect(c *gin.Context, link *model.Link) {
 			return
 		}
 	}
-	common.SetPreconnectHeader(c.Writer, link.URL, []string{"Referer", "User-Agent"})
-	// The target URL is signed and changes on every request, so a cache must never
-	// replay one 302 Location for a later one.
-	c.Header("Vary", "Origin, Range, Referer, User-Agent")
+	common.SetPreconnectHeader(c.Writer, link.URL)
+	common.CacheableClientRedirect(c.Writer)
 	c.Redirect(302, link.URL)
 }
 

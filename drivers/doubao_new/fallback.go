@@ -233,6 +233,9 @@ func (d *DoubaoNew) fallbackList(ctx context.Context, dir model.Obj) ([]model.Ob
 			NodeType: n.NodeType,
 		})
 	}
+	// Files listed here have no feishu obj token, so warming them means a
+	// samantha play-info round trip; do it now rather than on the first seek.
+	d.warmFallbackObjects(objs)
 	return objs, nil
 }
 

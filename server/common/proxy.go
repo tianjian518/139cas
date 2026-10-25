@@ -18,35 +18,41 @@ import (
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
 )
 
-// SetPreconnectHeader tells the client to open a connection to the redirect
-// target ahead of time. When a player seeks, it issues a fresh request and
-// follows a fresh redirect to the storage CDN; preconnecting on every 302 lets
-// the browser warm up TCP+TLS for that host in parallel, so the next seek
-// skips connection setup instead of paying it inside the critical path.
+// SetPreconnectHeader asks the client to open a connection to the redirect
+// target ahead of time, so the next seek does not pay TCP+TLS setup inside its
+// critical path. This is a hint only: the redirect stays a plain 302 and not a
+// single byte of the media passes through this server.
 //
-// Cross-origin CDNs only honor preconnect for requests without credentials
-// (the fetch spec's "credentials" preconnect mode, which anonymous CORS
-// requests use), so anonymous=1 is emitted for the target. The storage CDN
-// needs no cookies; Referer and User-Agent are the headers actually sent with
-// the media request and therefore carry crossorigin only. Any other
-// credential-carrying header is marked unsafe.
-func SetPreconnectHeader(w http.ResponseWriter, target string, credentialed []string) {
+// Browsers only honour preconnect for requests without credentials (the fetch
+// spec's "credentials" preconnect mode), which anonymous CORS requests use, so
+// an unqualified preconnect would be ignored for a fetch-based player. The
+// origin is therefore emitted once as anonymous=1 and once as bare
+// crossorigin, which is the mode a <video src> media request actually uses.
+// CacheableClientRedirect must be called alongside it, otherwise a cache can
+// replay an already-used signature.
+func SetPreconnectHeader(w http.ResponseWriter, target string) {
 	u, err := url.Parse(target)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return
 	}
-	params := "anonymous=1"
-	for _, name := range []string{"Referer", "User-Agent"} {
-		params += "; crossorigin=" + strings.ToLower(name)
-	}
-	for _, name := range credentialed {
-		l := strings.ToLower(name)
-		if l == "referer" || l == "user-agent" {
-			continue
-		}
-		params += "; crossorigin=unsafe-" + l
-	}
-	w.Header().Set("Link", fmt.Sprintf("<%s://%s>; rel=preconnect; %s", u.Scheme, u.Host, params))
+	origin := fmt.Sprintf("%s://%s", u.Scheme, u.Host)
+	w.Header().Add("Link", fmt.Sprintf("<%s>; rel=preconnect; anonymous=1", origin))
+	w.Header().Add("Link", fmt.Sprintf("<%s>; rel=preconnect; crossorigin", origin))
+}
+
+// CacheableClientRedirect marks a 302 that the client may cache for a day.
+//
+// Every seek fans out into an identical 302 plus a range request to the CDN,
+// and the 302 is pure latency in front of that. Both the Samatha/Feishu token
+// and the redirect target stay valid for well over a day, so a short cache
+// removes the hop entirely for repeated seeks while the media itself still
+// comes straight from the CDN. One day is long enough to cover a session and
+// short enough that a revoked token cannot outlive it.
+func CacheableClientRedirect(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	// The Location is signed, so a cache must never hand one client's redirect
+	// to another: only store it in the requesting client's own cache.
+	w.Header().Set("Vary", "Referer")
 }
 
 func Proxy(w http.ResponseWriter, r *http.Request, link *model.Link, file model.Obj) error {

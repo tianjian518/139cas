@@ -44,6 +44,13 @@ type DoubaoNew struct {
 	authRefreshMu       sync.Mutex
 	authRefreshPublicMu sync.Mutex
 
+	// signed stream URL per obj_token, so a seek doesn't re-sign on the
+	// critical path.
+	links     *linkCache
+	prewarmer *linkPreWarmer
+	pages     *dirPageCache
+	linksMu   sync.Mutex
+
 	// child node_id -> parent node_id, used by the samantha fallback to find a
 	// file's media key without re-walking the tree on every seek.
 	samanthaMu      sync.Mutex
@@ -139,7 +146,7 @@ func (d *DoubaoNew) List(ctx context.Context, dir model.Obj, args model.ListArgs
 		d.rememberSamanthaRoot(dir.GetID())
 	}
 
-	nodes, err := d.listAllChildren(ctx, dir.GetID())
+	nodes, err := d.listAllChildren(ctx, dir.GetID(), args.Refresh)
 	if err != nil {
 		return d.fallbackList(ctx, dir)
 	}
@@ -177,6 +184,10 @@ func (d *DoubaoNew) List(ctx context.Context, dir model.Obj, args model.ListArgs
 	}
 	d.rememberSamanthaChildren(dir.GetID(), samanthaChildren)
 
+	// Sign the files' links while the player is still drawing its list, so the
+	// first Range request is answered from a warm cache.
+	d.warmObjects(objs)
+
 	return objs, nil
 }
 
@@ -193,8 +204,15 @@ func (d *DoubaoNew) Link(ctx context.Context, file model.Obj, args model.LinkArg
 	// 4101) regardless of the local token state, so fall back to the old
 	// samantha interface. It also returns a direct CDN URL, so the 302 and the
 	// direct browser-to-CDN traffic are preserved.
+	fbKey := fallbackCacheKey(obj.GetID())
+	if cached, ok := d.linkCacheFor().get(fbKey); ok {
+		return &model.Link{URL: cached.url, Header: linkHeaders(cached.referer)}, nil
+	}
 	fallback, fbErr := d.fallbackLink(ctx, obj)
 	if fbErr == nil {
+		if fallback != nil && fallback.URL != "" {
+			d.linkCacheFor().put(fbKey, fallback.URL, DoubaoURL+"/")
+		}
 		return fallback, nil
 	}
 	return nil, fmt.Errorf("%w (fallback: %v)", err, fbErr)
@@ -207,6 +225,12 @@ func (d *DoubaoNew) feishuLink(ctx context.Context, file model.Obj, args model.L
 	}
 	if obj.IsFolder {
 		return nil, fmt.Errorf("link is directory")
+	}
+	// A samantha-fallback object has no feishu obj token and therefore no
+	// feishu link; going through Link() gets it straight to its own path
+	// instead of paying a failing request first.
+	if obj.ObjToken == "" {
+		return nil, errors.New("missing obj_token")
 	}
 	var (
 		err        error
@@ -238,14 +262,47 @@ func (d *DoubaoNew) feishuLink(ctx context.Context, file model.Obj, args model.L
 		return nil, errors.New("missing obj_token")
 	}
 
+	// A seek re-asks for the same file within seconds; reusing the signed URL
+	// keeps a JWT refresh and an ES256 signature off that critical path. The
+	// URL outlives the cache by an order of magnitude (still valid at 6.5 min),
+	// so nothing served from here is close to expiry.
+	cacheKey := obj.ObjToken
+	if d.ShareLink {
+		cacheKey = "share:" + cacheKey
+	}
+	if args.Type == "preview" || args.Type == "thumb" {
+		cacheKey += ":" + args.Type
+	}
+	if cached, ok := d.linkCacheFor().get(cacheKey); ok {
+		return &model.Link{URL: cached.url, Header: linkHeaders(cached.referer)}, nil
+	}
+
+	// A player that seeks immediately after a cold start can fire two Range
+	// requests at once; without this, both would sign, and both would pay for
+	// it. The first one signs, the others wait and reuse the result.
+	if done, wait := d.linkCacheFor().begin(cacheKey); done == nil {
+		select {
+		case <-wait:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		if cached, ok := d.linkCacheFor().get(cacheKey); ok {
+			return &model.Link{URL: cached.url, Header: linkHeaders(cached.referer)}, nil
+		}
+	} else {
+		defer d.linkCacheFor().end(cacheKey)
+	}
+
 	query := url.Values{}
 	query.Set("authorization", auth)
 	query.Set("dpop", dpop)
 
 	downloadURL := DownloadBaseURL + "/space/api/box/stream/download/all/" + obj.ObjToken + "/?" + query.Encode()
+	referer := DoubaoURL + "/"
+	d.linkCacheFor().put(cacheKey, downloadURL, referer)
 
 	headers := http.Header{
-		"Referer":    []string{DoubaoURL + "/"},
+		"Referer":    []string{referer},
 		"User-Agent": []string{base.UserAgent},
 	}
 
@@ -255,11 +312,21 @@ func (d *DoubaoNew) feishuLink(ctx context.Context, file model.Obj, args model.L
 	}, nil
 }
 
+func (d *DoubaoNew) linkCacheFor() *linkCache {
+	d.linksMu.Lock()
+	defer d.linksMu.Unlock()
+	if d.links == nil {
+		d.links = newLinkCache()
+	}
+	return d.links
+}
+
 func (d *DoubaoNew) MakeDir(ctx context.Context, parentDir model.Obj, dirName string) (model.Obj, error) {
 	node, err := d.createFolder(ctx, parentDir.GetID(), dirName)
 	if err != nil {
 		return nil, err
 	}
+	d.pageCache().invalidate(parentDir.GetID())
 	return &Object{
 		Object: model.Object{
 			ID:       node.NodeToken,
@@ -296,6 +363,8 @@ func (d *DoubaoNew) Move(ctx context.Context, srcObj, dstDir model.Obj) (model.O
 	if err := d.moveObj(ctx, srcToken, dstDir.GetID()); err != nil {
 		return nil, err
 	}
+	d.pageCache().invalidate(srcObj.GetPath())
+	d.pageCache().invalidate(dstDir.GetID())
 	if obj, ok := srcObj.(*Object); ok {
 		clone := *obj
 		clone.Path = dstDir.GetID()
@@ -325,6 +394,7 @@ func (d *DoubaoNew) Rename(ctx context.Context, srcObj model.Obj, newName string
 		}
 	}
 
+	d.pageCache().invalidate(srcObj.GetPath())
 	if obj, ok := srcObj.(*Object); ok {
 		clone := *obj
 		clone.Name = newName
@@ -351,7 +421,11 @@ func (d *DoubaoNew) Remove(ctx context.Context, obj model.Obj) error {
 	if token == "" {
 		return errors.New("missing object token")
 	}
-	return d.removeObj(ctx, []string{token})
+	if err := d.removeObj(ctx, []string{token}); err != nil {
+		return err
+	}
+	d.pageCache().invalidate(obj.GetPath())
+	return nil
 }
 
 func (d *DoubaoNew) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer, up driver.UpdateProgress) (model.Obj, error) {
@@ -532,6 +606,7 @@ func (d *DoubaoNew) Put(ctx context.Context, dstDir model.Obj, file model.FileSt
 	if nodeToken == "" {
 		nodeToken = finish.FileToken
 	}
+	d.pageCache().invalidate(dstDir.GetID())
 	now := time.Now()
 	return &Object{
 		Object: model.Object{

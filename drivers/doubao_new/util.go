@@ -152,14 +152,36 @@ func (d *DoubaoNew) listChildren(ctx context.Context, parentToken string, lastLa
 	return resp.Data, nil
 }
 
-func (d *DoubaoNew) listAllChildren(ctx context.Context, parentToken string) ([]Node, error) {
+func (d *DoubaoNew) listAllChildren(ctx context.Context, parentToken string, refresh bool) ([]Node, error) {
 	length := 50
 	nodes := make([]Node, 0, length)
 	lastLabel := ""
 	for range 100 {
-		data, err := d.listChildren(ctx, parentToken, lastLabel, length)
-		if err != nil {
-			return nil, err
+		var data ListData
+		if !refresh {
+			if p, ok := d.pageCache().get(parentToken, lastLabel); ok {
+				data = ListData{
+					Entities:  entitiesFromNodes(p.nodes),
+					NodeList:  nodeTokens(p.nodes),
+					HasMore:   p.hasMore,
+					LastLabel: p.last,
+				}
+			}
+		}
+		if data.Entities.Nodes == nil {
+			var err error
+			data, err = d.listChildren(ctx, parentToken, lastLabel, length)
+			if err != nil {
+				return nil, err
+			}
+			// A page that failed on the next one leaves a partial walk behind;
+			// it is still worth keeping, because the next request will resume
+			// from exactly this cursor.
+			d.pageCache().put(parentToken, lastLabel, dirPage{
+				nodes:   nodesOfEntities(data),
+				hasMore: data.HasMore,
+				last:    data.LastLabel,
+			})
 		}
 
 		if len(data.NodeList) > 0 {
@@ -186,6 +208,45 @@ func (d *DoubaoNew) listAllChildren(ctx context.Context, parentToken string) ([]
 		return nil, nil
 	}
 	return nodes, nil
+}
+
+// entitiesFromNodes and nodeTokens rebuild the shape listChildren decodes, so a
+// cached page feeds the same loop as a live one.
+func entitiesFromNodes(nodes []Node) Entities {
+	m := make(map[string]Node, len(nodes))
+	for _, n := range nodes {
+		if n.NodeToken != "" {
+			m[n.NodeToken] = n
+		}
+	}
+	return Entities{Nodes: m}
+}
+
+func nodeTokens(nodes []Node) []string {
+	tokens := make([]string, 0, len(nodes))
+	for _, n := range nodes {
+		if n.NodeToken != "" {
+			tokens = append(tokens, n.NodeToken)
+		}
+	}
+	return tokens
+}
+
+func nodesOfEntities(data ListData) []Node {
+	if len(data.NodeList) > 0 {
+		nodes := make([]Node, 0, len(data.NodeList))
+		for _, token := range data.NodeList {
+			if n, ok := data.Entities.Nodes[token]; ok {
+				nodes = append(nodes, n)
+			}
+		}
+		return nodes
+	}
+	nodes := make([]Node, 0, len(data.Entities.Nodes))
+	for _, n := range data.Entities.Nodes {
+		nodes = append(nodes, n)
+	}
+	return nodes
 }
 
 func (d *DoubaoNew) getFileInfo(ctx context.Context, fileToken string) (FileInfo, error) {
