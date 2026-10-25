@@ -190,3 +190,39 @@ type bizAuthResp struct {
 	} `json:"data"`
 	Message string `json:"message"`
 }
+
+// ---- old (samantha) interface, used as a fallback when the Feishu drive API fails ----
+
+type samanthaNode struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Key      string `json:"key"`
+	Size     int64  `json:"size"`
+	NodeType int    `json:"node_type"` // 1 = folder, 6 = file
+	ParentID string `json:"parent_id"`
+}
+
+type samanthaPage struct {
+	Children   []samanthaNode `json:"children"`
+	NextCursor string         `json:"next_cursor"`
+	HasMore    bool           `json:"has_more"`
+}
+
+type samanthaHome struct {
+	RootID   string         `json:"root_id"`
+	Children []samanthaNode `json:"children"`
+}
+
+type samanthaMedia struct {
+	MainURL string `json:"main_url"`
+	Meta    struct {
+		Definition string `json:"definition"`
+		Width      string `json:"width"`
+		Height     string `json:"height"`
+	} `json:"meta"`
+}
+
+type samanthaPlayInfo struct {
+	MediaInfo []samanthaMedia `json:"media_info"`
+	MediaType string          `json:"media_type"`
+}

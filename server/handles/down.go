@@ -180,6 +180,10 @@ func redirect(c *gin.Context, link *model.Link) {
 			return
 		}
 	}
+	common.SetPreconnectHeader(c.Writer, link.URL, []string{"Referer", "User-Agent"})
+	// The target URL is signed and changes on every request, so a cache must never
+	// replay one 302 Location for a later one.
+	c.Header("Vary", "Origin, Range, Referer, User-Agent")
 	c.Redirect(302, link.URL)
 }
 

@@ -43,6 +43,12 @@ type DoubaoNew struct {
 
 	authRefreshMu       sync.Mutex
 	authRefreshPublicMu sync.Mutex
+
+	// child node_id -> parent node_id, used by the samantha fallback to find a
+	// file's media key without re-walking the tree on every seek.
+	samanthaMu      sync.Mutex
+	samanthaParents map[string]string
+	samanthaRoot    string
 }
 
 func (d *DoubaoNew) Config() driver.Config {
@@ -127,16 +133,24 @@ func (d *DoubaoNew) Drop(ctx context.Context) error {
 }
 
 func (d *DoubaoNew) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([]model.Obj, error) {
+	if dir.GetID() == "" {
+		d.rememberSamanthaRoot("")
+	} else if dir.GetPath() == "" {
+		d.rememberSamanthaRoot(dir.GetID())
+	}
+
 	nodes, err := d.listAllChildren(ctx, dir.GetID())
 	if err != nil {
-		return nil, err
+		return d.fallbackList(ctx, dir)
 	}
 
 	objs := make([]model.Obj, 0, len(nodes))
+	samanthaChildren := make([]samanthaNode, 0, len(nodes))
 	for _, node := range nodes {
 		if node.NodeToken == "" || node.ObjToken == "" {
 			continue
 		}
+		samanthaChildren = append(samanthaChildren, samanthaNode{ID: node.NodeToken, Name: node.Name})
 
 		size := parseSize(node.Extra.Size)
 		isFolder := node.Type == 0
@@ -161,11 +175,32 @@ func (d *DoubaoNew) List(ctx context.Context, dir model.Obj, args model.ListArgs
 		}
 		objs = append(objs, obj)
 	}
+	d.rememberSamanthaChildren(dir.GetID(), samanthaChildren)
 
 	return objs, nil
 }
 
 func (d *DoubaoNew) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (*model.Link, error) {
+	link, err := d.feishuLink(ctx, file, args)
+	if err == nil {
+		return link, nil
+	}
+	obj, ok := file.(*Object)
+	if !ok {
+		return nil, err
+	}
+	// The Feishu drive API can be rejected server-side (LogoutReason:1 / code
+	// 4101) regardless of the local token state, so fall back to the old
+	// samantha interface. It also returns a direct CDN URL, so the 302 and the
+	// direct browser-to-CDN traffic are preserved.
+	fallback, fbErr := d.fallbackLink(ctx, obj)
+	if fbErr == nil {
+		return fallback, nil
+	}
+	return nil, fmt.Errorf("%w (fallback: %v)", err, fbErr)
+}
+
+func (d *DoubaoNew) feishuLink(ctx context.Context, file model.Obj, args model.LinkArgs) (*model.Link, error) {
 	obj, ok := file.(*Object)
 	if !ok {
 		return nil, errors.New("unsupported object type")

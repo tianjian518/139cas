@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"maps"
@@ -16,6 +17,37 @@ import (
 	"github.com/OpenListTeam/OpenList/v4/internal/stream"
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
 )
+
+// SetPreconnectHeader tells the client to open a connection to the redirect
+// target ahead of time. When a player seeks, it issues a fresh request and
+// follows a fresh redirect to the storage CDN; preconnecting on every 302 lets
+// the browser warm up TCP+TLS for that host in parallel, so the next seek
+// skips connection setup instead of paying it inside the critical path.
+//
+// Cross-origin CDNs only honor preconnect for requests without credentials
+// (the fetch spec's "credentials" preconnect mode, which anonymous CORS
+// requests use), so anonymous=1 is emitted for the target. The storage CDN
+// needs no cookies; Referer and User-Agent are the headers actually sent with
+// the media request and therefore carry crossorigin only. Any other
+// credential-carrying header is marked unsafe.
+func SetPreconnectHeader(w http.ResponseWriter, target string, credentialed []string) {
+	u, err := url.Parse(target)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return
+	}
+	params := "anonymous=1"
+	for _, name := range []string{"Referer", "User-Agent"} {
+		params += "; crossorigin=" + strings.ToLower(name)
+	}
+	for _, name := range credentialed {
+		l := strings.ToLower(name)
+		if l == "referer" || l == "user-agent" {
+			continue
+		}
+		params += "; crossorigin=unsafe-" + l
+	}
+	w.Header().Set("Link", fmt.Sprintf("<%s://%s>; rel=preconnect; %s", u.Scheme, u.Host, params))
+}
 
 func Proxy(w http.ResponseWriter, r *http.Request, link *model.Link, file model.Obj) error {
 	// if link.MFile != nil {
