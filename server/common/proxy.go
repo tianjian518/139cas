@@ -28,8 +28,8 @@ import (
 // an unqualified preconnect would be ignored for a fetch-based player. The
 // origin is therefore emitted once as anonymous=1 and once as bare
 // crossorigin, which is the mode a <video src> media request actually uses.
-// CacheableClientRedirect must be called alongside it, otherwise a cache can
-// replay an already-used signature.
+// NoCacheRedirect must be called alongside it, otherwise a cache can replay an
+// already-used signature.
 func SetPreconnectHeader(w http.ResponseWriter, target string) {
 	u, err := url.Parse(target)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
@@ -40,18 +40,20 @@ func SetPreconnectHeader(w http.ResponseWriter, target string) {
 	w.Header().Add("Link", fmt.Sprintf("<%s>; rel=preconnect; crossorigin", origin))
 }
 
-// CacheableClientRedirect marks a 302 that the client may cache for a day.
+// NoCacheRedirect marks a 302 so that no client or proxy stores it.
 //
-// Every seek fans out into an identical 302 plus a range request to the CDN,
-// and the 302 is pure latency in front of that. Both the Samatha/Feishu token
-// and the redirect target stay valid for well over a day, so a short cache
-// removes the hop entirely for repeated seeks while the media itself still
-// comes straight from the CDN. One day is long enough to cover a session and
-// short enough that a revoked token cannot outlive it.
-func CacheableClientRedirect(w http.ResponseWriter) {
-	w.Header().Set("Cache-Control", "public, max-age=86400")
-	// The Location is signed, so a cache must never hand one client's redirect
-	// to another: only store it in the requesting client's own cache.
+// It used to answer "public, max-age=86400". That saved the hop on repeated
+// seeks, but on the Feishu CDN a stale redirect is worse than a fresh one: the
+// DPoP proof inside the signed URL has a one-hour life while the URL itself is
+// good for days, so a player that replays a cached 302 from an earlier session
+// seeks to a URL the CDN has already dropped. The redirect is signed per request
+// and costs under a millisecond to reissue, and it is never followed by the
+// server, so revalidating it is free. Players that issue several range requests
+// at once therefore always get a live URL, not a replay.
+func NoCacheRedirect(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
+	// The Location is signed, i.e. specific to the requesting client. No shared
+	// cache in between may ever reuse it.
 	w.Header().Set("Vary", "Referer")
 }
 

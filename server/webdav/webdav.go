@@ -260,7 +260,7 @@ func (h *Handler) handleGetHeadPost(w http.ResponseWriter, r *http.Request) (sta
 		}
 		defer link.Close()
 		common.SetPreconnectHeader(w, link.URL)
-		common.CacheableClientRedirect(w)
+		common.NoCacheRedirect(w)
 		http.Redirect(w, r, link.URL, http.StatusFound)
 		return 0, nil
 	}

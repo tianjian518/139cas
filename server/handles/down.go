@@ -140,11 +140,20 @@ func linkCASPreview(c *gin.Context, rawPath string, storage driver.Driver, args 
 	if !ok {
 		return nil, nil, false, nil
 	}
-	obj, err := fs.Get(c.Request.Context(), rawPath, &fs.GetArgs{})
+	ctx := c.Request.Context()
+	casPath := rawPath
+	obj, err := fs.Get(ctx, rawPath, &fs.GetArgs{})
+	if err != nil && !isCASFile(rawPath) {
+		// 路径已是还原后的真实扩展名（如 .mp4）时，存储上只有同名 .cas，
+		// 回退到 .cas 对象，避免 404。
+		if casObj, casErr := fs.Get(ctx, rawPath+".cas", &fs.GetArgs{}); casErr == nil {
+			obj, err, casPath = casObj, nil, rawPath+".cas"
+		}
+	}
 	if err != nil {
 		return nil, nil, false, err
 	}
-	previewName, err := namer.CASPreviewName(c.Request.Context(), obj)
+	previewName, err := namer.CASPreviewName(ctx, obj)
 	if err != nil {
 		return nil, nil, false, err
 	}
@@ -152,7 +161,7 @@ func linkCASPreview(c *gin.Context, rawPath string, storage driver.Driver, args 
 		return nil, nil, false, nil
 	}
 	args.Type = "cas_video"
-	link, file, err := fs.Link(c.Request.Context(), rawPath, args)
+	link, file, err := fs.Link(ctx, casPath, args)
 	if err != nil {
 		return nil, nil, false, err
 	}
@@ -180,7 +189,7 @@ func redirect(c *gin.Context, link *model.Link) {
 		}
 	}
 	common.SetPreconnectHeader(c.Writer, link.URL)
-	common.CacheableClientRedirect(c.Writer)
+	common.NoCacheRedirect(c.Writer)
 	c.Redirect(302, link.URL)
 }
 
