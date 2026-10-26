@@ -19,8 +19,11 @@ on:
     tags:
       - 'v*'
 
+# A tag push and a manual dispatch of the same commit are two full runs of the
+# same ten multi-arch pushes; they serialize on the registry and one of them
+# loses with a manifest-put conflict. Only the newest run of a ref survives.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event.inputs.as_latest }}
   cancel-in-progress: true
 
 env:
